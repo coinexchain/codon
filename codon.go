@@ -10,15 +10,12 @@ import (
 	"unicode"
 )
 
-const (
-	VersionOfAPI = 1
-)
-
 func ShowInfoForVar(leafTypes map[string]string, v interface{}) {
 	t := reflect.TypeOf(v)
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
+	// Print the information header
 	fmt.Printf("======= %v '%s' '%s' == \n", t, t.PkgPath(), t.Name())
 	showInfo(leafTypes, "", t)
 }
@@ -84,7 +81,7 @@ func showInfo(leafTypes map[string]string, indent string, t reflect.Type) {
 		fmt.Printf("map!")
 	case reflect.Ptr:
 		path := t.Elem().PkgPath() + "." + t.Elem().Name()
-		if _, ok := leafTypes[path]; ok {
+		if _, ok := leafTypes[path]; ok { // Stop when meeting a leaf type
 			fmt.Printf("pointer ('%s' '%s')\n", t.Elem().PkgPath(), t.Elem().Name())
 		} else {
 			fmt.Printf("pointer ('%s' '%s') {\n", t.Elem().PkgPath(), t.Elem().Name())
@@ -110,7 +107,7 @@ func showInfo(leafTypes map[string]string, indent string, t reflect.Type) {
 		fmt.Printf("string")
 	case reflect.Struct:
 		path := t.PkgPath() + "." + t.Name()
-		if _, ok := leafTypes[path]; ok {
+		if _, ok := leafTypes[path]; ok { // Stop when meeting a leaf type
 			fmt.Printf("struct ('%s' '%s')\n", t.PkgPath(), t.Name())
 		} else {
 			if structHasPrivateField(t) {
@@ -152,8 +149,9 @@ func calcMagicBytes(lines []string) [4]byte {
 	return res
 }
 
-type AliasAndValue struct {
+type TypeEntry struct {
 	Alias string
+	Name string
 	Value interface{}
 }
 
@@ -167,9 +165,23 @@ func writeLines(w io.Writer, lines []string) {
 	}
 }
 
-func GenerateCodecFile(w io.Writer, leafTypes, ignoreImpl map[string]string, aliasAndValueList []AliasAndValue,
-	extraLogics string, extraImports []string) {
+func GenerateCodecFile(
+	//output target
+	w io.Writer,
+	// contains the types which should be regarded as leaf types
+	// Key is the full type name, Value is the short type name
+	leafTypes map[string]string,
+	// Some struct->interface implementation relationship must be ignored
+	// Key is struct's alias and Value is interface's alias
+	ignoreImpl map[string]string,
+	// The types for which we will generate code
+	typeEntryList []TypeEntry,
+	// extra logics to put in the generated code
+	extraLogics string,
+	// extra imported packages to put in the generated code
+	extraImports []string) {
 
+	// The beginning of the generated file
 	w.Write([]byte("//nolint\npackage codec\nimport (\n"))
 	for _, p := range extraImports {
 		w.Write([]byte(p + "\n"))
@@ -177,66 +189,83 @@ func GenerateCodecFile(w io.Writer, leafTypes, ignoreImpl map[string]string, ali
 	w.Write([]byte("\"io\"\n\"encoding/binary\"\n\"math\"\n\"errors\"\n)\n"))
 	w.Write([]byte(headerLogics))
 	w.Write([]byte(extraLogics))
-	ctx := newPrepareCtx(leafTypes, ignoreImpl)
-	for _, entry := range aliasAndValueList {
-		ctx.register(entry.Alias, entry.Value)
+
+	// Now initialize the context
+	ctx := newContext(leafTypes, ignoreImpl)
+	for _, entry := range typeEntryList {
+		ctx.register(entry.Alias, entry.Name, entry.Value)
 	}
 	ctx.analyzeIfc()
-	for _, entry := range aliasAndValueList {
+
+	// Generate functions for structs
+	for _, entry := range typeEntryList {
 		t := derefPtr(entry.Value)
 		if t.Kind() != reflect.Interface {
 			w.Write([]byte("// Non-Interface\n"))
-			lines := ctx.prepareStructFunc(entry.Alias, t)
+			lines := ctx.generateStructFunc(entry.Alias, t)
 			writeLines(w, lines)
 		}
 	}
-	for _, entry := range aliasAndValueList {
+	// Generate functions for interfaces
+	for _, entry := range typeEntryList {
 		t := derefPtr(entry.Value)
 		if t.Kind() == reflect.Interface {
 			w.Write([]byte("// Interface\n"))
-			lines := ctx.prepareIfcFunc(entry.Alias, t)
+			lines := ctx.generateIfcFunc(entry.Alias, t)
 			writeLines(w, lines)
 		}
 	}
-	lines := ctx.prepareMagicBytesFunc()
+	// Generate the "getMagicBytes" function, which maps aliases to magic bytes
+	lines := ctx.generateMagicBytesFunc()
 	writeLines(w, lines)
 
+	// Get sorted list of struct aliases
 	aliases := make([]string, 0, len(ctx.structPath2Alias))
 	for _, alias := range ctx.structPath2Alias {
 		aliases = append(aliases, alias)
 	}
 	sort.Strings(aliases)
-	lines = prepareIfcEncodeFunc("EncodeAny", aliases)
+	// Top-level encode function, which supports all the registered types. It writes magic bytes at the beginning
+	lines = generateIfcEncodeFunc("EncodeAny", aliases)
 	writeLines(w, lines)
-	lines = prepareBareEncodeAnyFunc(aliases)
+	// Top-level encode function, which supports all the registered types. It does NOT writes magic bytes
+	lines = generateBareEncodeAnyFunc(aliases)
 	writeLines(w, lines)
-	lines = ctx.prepareDecodeAnyFunc()
+	// Top-level decode function, which supports all the registered types. It uses magic bytes to decide type
+	lines = ctx.generateDecodeAnyFunc()
 	writeLines(w, lines)
-	lines = prepareBareDecodeAnyFunc(aliases)
+	// Top-level decode function, which supports all the registered types. It regards input pointer's type.
+	lines = generateBareDecodeAnyFunc(aliases)
 	writeLines(w, lines)
-	lines = prepareIfcRandFunc("RandAny", "interface{}", aliases, nil)
+	// Fill an interface object, randomly select the underlying struct type and randomly fill the fields
+	lines, aliases = generateIfcRandFunc("RandAny", "interface{}", aliases, nil)
 	writeLines(w, lines)
-	lines = ctx.prepareSupportListFunc()
+	// DeepCopy an interface object
+	lines = generateIfcDeepCopyFunc("DeepCopyAny", "interface{}", aliases)
+	writeLines(w, lines)
+	// Generate a GetSupportList function which returns the sorted full path list of all the supported types
+	lines = ctx.generateSupportListFunc()
 	writeLines(w, lines)
 }
 
-type prepareCtx struct {
+type context struct {
 	structPath2Alias map[string]string
 	ifcPath2Alias    map[string]string
 	structPath2Type  map[string]reflect.Type
 	ifcPath2Type     map[string]reflect.Type
 
+	// map an interface to its implementations
 	ifcPath2StructPaths map[string][]string
 
 	structAlias2MagicBytes map[string]MagicBytes
-	magicBytes2Alias       map[MagicBytes]string
+	magicBytes2StructAlias map[MagicBytes]string
 
 	leafTypes  map[string]string
 	ignoreImpl map[string]string
 }
 
-func newPrepareCtx(leafTypes, ignoreImpl map[string]string) *prepareCtx {
-	return &prepareCtx{
+func newContext(leafTypes, ignoreImpl map[string]string) *context {
+	return &context{
 		structPath2Alias: make(map[string]string),
 		ifcPath2Alias:    make(map[string]string),
 		structPath2Type:  make(map[string]reflect.Type),
@@ -244,13 +273,13 @@ func newPrepareCtx(leafTypes, ignoreImpl map[string]string) *prepareCtx {
 
 		ifcPath2StructPaths:    make(map[string][]string),
 		structAlias2MagicBytes: make(map[string]MagicBytes),
-		magicBytes2Alias:       make(map[MagicBytes]string),
+		magicBytes2StructAlias: make(map[MagicBytes]string),
 		leafTypes:              leafTypes,
 		ignoreImpl:             ignoreImpl,
 	}
 }
 
-func prepareIfcEncodeFunc(funcName string, aliases []string) []string {
+func generateIfcEncodeFunc(funcName string, aliases []string) []string {
 	lines := make([]string, 0, 1000)
 	lines = append(lines, "func "+funcName+"(w io.Writer, x interface{}) error {")
 	lines = append(lines, "switch v := x.(type) {")
@@ -270,7 +299,7 @@ func prepareIfcEncodeFunc(funcName string, aliases []string) []string {
 	return lines
 }
 
-func prepareIfcRandFunc(funcName, ifc string, aliases []string, ignoreImpl map[string]string) []string {
+func generateIfcRandFunc(funcName, ifc string, aliases []string, ignoreImpl map[string]string) ([]string, []string) {
 	lines := make([]string, 0, 1000)
 	lines = append(lines, "func "+funcName+"(r RandSrc) "+ifc+" {")
 	newAliases := make([]string, 0, len(aliases))
@@ -288,15 +317,32 @@ func prepareIfcRandFunc(funcName, ifc string, aliases []string, ignoreImpl map[s
 	lines = append(lines, "panic(\"Unknown Type.\")")
 	lines = append(lines, "} // end of switch")
 	lines = append(lines, "} // end of func")
+	return lines, newAliases
+}
+
+func generateIfcDeepCopyFunc(funcName, ifc string, aliases []string) []string {
+	lines := make([]string, 0, 1000)
+	lines = append(lines, fmt.Sprintf("func %s(x %s) %s {", funcName, ifc, ifc))
+	lines = append(lines, "switch v := x.(type) {")
+	for _, alias := range aliases {
+		lines = append(lines, fmt.Sprintf("case *%s:", alias))
+		lines = append(lines, fmt.Sprintf("res := DeepCopy%s(*v)\nreturn &res", alias))
+		lines = append(lines, fmt.Sprintf("case %s:", alias))
+		lines = append(lines, fmt.Sprintf("res := DeepCopy%s(v)\nreturn &res", alias))
+	}
+	lines = append(lines, "default:")
+	lines = append(lines, "panic(\"Unknown Type.\")")
+	lines = append(lines, "} // end of switch")
+	lines = append(lines, "} // end of func")
 	return lines
 }
 
-func (ctx *prepareCtx) prepareDecodeAnyFunc() []string {
-	res, _ := prepareIfcDecodeFunc("DecodeAny", "interface{}", ctx.structAlias2MagicBytes)
+func (ctx *context) generateDecodeAnyFunc() []string {
+	res, _ := generateIfcDecodeFunc("DecodeAny", "interface{}", ctx.structAlias2MagicBytes)
 	return res
 }
 
-func prepareIfcDecodeFunc(funcName, decType string, alias2bytes map[string]MagicBytes) ([]string, []string) {
+func generateIfcDecodeFunc(funcName, decType string, alias2bytes map[string]MagicBytes) ([]string, []string) {
 	aliases := make([]string, 0, len(alias2bytes))
 	for alias := range alias2bytes {
 		aliases = append(aliases, alias)
@@ -324,7 +370,7 @@ func prepareIfcDecodeFunc(funcName, decType string, alias2bytes map[string]Magic
 	return lines, aliases
 }
 
-func prepareBareEncodeAnyFunc(aliases []string) []string {
+func generateBareEncodeAnyFunc(aliases []string) []string {
 	lines := make([]string, 0, 1000)
 	lines = append(lines, "func BareEncodeAny(w io.Writer, x interface{}) error {")
 	lines = append(lines, "switch v := x.(type) {")
@@ -342,7 +388,7 @@ func prepareBareEncodeAnyFunc(aliases []string) []string {
 	return lines
 }
 
-func prepareBareDecodeAnyFunc(aliases []string) []string {
+func generateBareDecodeAnyFunc(aliases []string) []string {
 	lines := make([]string, 0, 1000)
 	lines = append(lines, "func BareDecodeAny(bz []byte, x interface{}) (n int, err error) {")
 	lines = append(lines, "switch v := x.(type) {")
@@ -358,7 +404,7 @@ func prepareBareDecodeAnyFunc(aliases []string) []string {
 	return lines
 }
 
-func (ctx *prepareCtx) prepareMagicBytesFunc() []string {
+func (ctx *context) generateMagicBytesFunc() []string {
 	lines := make([]string, 0, 1000)
 	lines = append(lines, "func getMagicBytes(name string) []byte {")
 	lines = append(lines, "switch name {")
@@ -380,7 +426,7 @@ func (ctx *prepareCtx) prepareMagicBytesFunc() []string {
 	return lines
 }
 
-func (ctx *prepareCtx) prepareSupportListFunc() []string {
+func (ctx *context) generateSupportListFunc() []string {
 	length := len(ctx.structPath2Alias) + len(ctx.ifcPath2Alias) + 10
 	paths := make([]string, 0, length)
 	for path := range ctx.structPath2Alias {
@@ -401,7 +447,7 @@ func (ctx *prepareCtx) prepareSupportListFunc() []string {
 	return lines
 }
 
-func (ctx *prepareCtx) analyzeIfc() {
+func (ctx *context) analyzeIfc() {
 	for ifcPath, ifcType := range ctx.ifcPath2Type {
 		for structPath, structType := range ctx.structPath2Type {
 			if structType.Implements(ifcType) {
@@ -423,7 +469,7 @@ func derefPtr(v interface{}) reflect.Type {
 	return t
 }
 
-func (ctx *prepareCtx) register(alias string, v interface{}) {
+func (ctx *context) register(alias string, name string, v interface{}) {
 	t := derefPtr(v)
 	path := t.PkgPath() + "." + t.Name()
 	if len(t.PkgPath()) == 0 || len(t.Name()) == 0 {
@@ -436,9 +482,15 @@ func (ctx *prepareCtx) register(alias string, v interface{}) {
 		ctx.structPath2Alias[path] = alias
 		ctx.structPath2Type[path] = t
 	}
+	magicBytes := calcMagicBytes([]string{alias, name})
+	if otherAlias, ok := ctx.magicBytes2StructAlias[magicBytes]; ok {
+		panic("Magic Bytes Conflicts: " + otherAlias + " vs " + alias)
+	}
+	ctx.structAlias2MagicBytes[alias] = magicBytes
+	ctx.magicBytes2StructAlias[magicBytes] = alias
 }
 
-func (ctx *prepareCtx) prepareIfcFunc(ifc string, t reflect.Type) []string {
+func (ctx *context) generateIfcFunc(ifc string, t reflect.Type) []string {
 	ifcPath := t.PkgPath() + "." + t.Name()
 	structPaths, ok := ctx.ifcPath2StructPaths[ifcPath]
 	if !ok {
@@ -456,19 +508,24 @@ func (ctx *prepareCtx) prepareIfcFunc(ifc string, t reflect.Type) []string {
 		}
 		alias2bytes[alias] = magicBytes
 	}
-	decLines, aliases := prepareIfcDecodeFunc("Decode"+ifc, ifc, alias2bytes)
-	encLines := prepareIfcEncodeFunc("Encode"+ifc, aliases)
-	randLines := prepareIfcRandFunc("Rand"+ifc, ifc, aliases, ctx.ignoreImpl)
-	return append(append(encLines, decLines...), randLines...)
+	decLines, aliases := generateIfcDecodeFunc("Decode"+ifc, ifc, alias2bytes)
+	encLines := generateIfcEncodeFunc("Encode"+ifc, aliases)
+	randLines, aliases := generateIfcRandFunc("Rand"+ifc, ifc, aliases, ctx.ignoreImpl)
+	deepcopyLines := generateIfcDeepCopyFunc("DeepCopy"+ifc, ifc, aliases)
+	result := make([]string, 0, len(decLines)+len(encLines)+len(randLines)+len(deepcopyLines))
+	result = append(result, decLines...)
+	result = append(result, encLines...)
+	result = append(result, randLines...)
+	result = append(result, deepcopyLines...)
+	return result
 }
 
-func (ctx *prepareCtx) prepareStructFunc(alias string, t reflect.Type) []string {
+func (ctx *context) generateStructFunc(alias string, t reflect.Type) []string {
 	lines := make([]string, 0, 1000)
 
-	apiLine := fmt.Sprintf("// codon version: %d", VersionOfAPI)
+	// Encode
 	line := fmt.Sprintf("func Encode%s(w io.Writer, v %s) error {", alias, alias)
 	lines = append(lines, line)
-	lines = append(lines, apiLine)
 	lines = append(lines, "var err error")
 	if t.Kind() == reflect.Struct {
 		ctx.genStructEncLines(t, &lines, "v", 0)
@@ -478,9 +535,9 @@ func (ctx *prepareCtx) prepareStructFunc(alias string, t reflect.Type) []string 
 	lines = append(lines, "return nil")
 	lines = append(lines, "} //End of Encode"+alias+"\n")
 
+	// Decode
 	line = fmt.Sprintf("func Decode%s(bz []byte) (%s, int, error) {", alias, alias)
 	lines = append(lines, line)
-	lines = append(lines, apiLine)
 	lines = append(lines, "var err error")
 	lengthLinePosition := len(lines)
 	lines = append(lines, "") // length placeholder
@@ -501,9 +558,9 @@ func (ctx *prepareCtx) prepareStructFunc(alias string, t reflect.Type) []string 
 	lines = append(lines, "return v, total, nil")
 	lines = append(lines, "} //End of Decode"+alias+"\n")
 
+	// Rand
 	line = fmt.Sprintf("func Rand%s(r RandSrc) %s {", alias, alias)
 	lines = append(lines, line)
-	lines = append(lines, apiLine)
 	lengthLinePosition = len(lines)
 	lines = append(lines, "") // length placeholder
 	lines = append(lines, "var v "+alias)
@@ -521,16 +578,31 @@ func (ctx *prepareCtx) prepareStructFunc(alias string, t reflect.Type) []string 
 	lines = append(lines, "return v")
 	lines = append(lines, "} //End of Rand"+alias+"\n")
 
-	magicBytes := calcMagicBytes(lines)
-	if otherAlias, ok := ctx.magicBytes2Alias[magicBytes]; ok {
-		panic("Magic Bytes Conflicts: " + otherAlias + " vs " + alias)
+	// DeepCopy
+	line = fmt.Sprintf("func DeepCopy%s(in %s) (out %s) {", alias, alias, alias)
+	lines = append(lines, line)
+	lengthLinePosition = len(lines)
+	lines = append(lines, "") // length placeholder
+	needLength = false
+	if t.Kind() == reflect.Struct {
+		nl := ctx.genStructDeepCopyLines(t, &lines, "", 0)
+		needLength = needLength || nl
+	} else {
+		nl := ctx.genFieldDeepCopyLines(t, &lines, "", 0)
+		needLength = needLength || nl
 	}
-	ctx.structAlias2MagicBytes[alias] = magicBytes
-	ctx.magicBytes2Alias[magicBytes] = alias
+	if needLength {
+		lines[lengthLinePosition] = "var length int"
+	}
+	lines = append(lines, "return")
+	lines = append(lines, "} //End of DeepCopy"+alias+"\n")
+
 	return lines
 }
 
-func (ctx *prepareCtx) genFieldEncLines(t reflect.Type, lines *[]string, fieldName string, iterLevel int) {
+//====================================================================
+
+func (ctx *context) genFieldEncLines(t reflect.Type, lines *[]string, fieldName string, iterLevel int) {
 	ending := "\nif err != nil {return err}"
 	isPtr := false
 	if t.Kind() == reflect.Ptr {
@@ -657,7 +729,7 @@ func (ctx *prepareCtx) genFieldEncLines(t reflect.Type, lines *[]string, fieldNa
 	*lines = append(*lines, line)
 }
 
-func (ctx *prepareCtx) genStructEncLines(t reflect.Type, lines *[]string, varName string, iterLevel int) {
+func (ctx *context) genStructEncLines(t reflect.Type, lines *[]string, varName string, iterLevel int) {
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
 		ctx.genFieldEncLines(field.Type, lines, varName+"."+field.Name, iterLevel)
@@ -666,7 +738,7 @@ func (ctx *prepareCtx) genStructEncLines(t reflect.Type, lines *[]string, varNam
 
 //=========================
 
-func (ctx *prepareCtx) getTypeName(elemT reflect.Type) string {
+func (ctx *context) getTypeName(elemT reflect.Type) string {
 	if elemT.Kind() == reflect.Ptr {
 		panic("slice/array of pointers are not support")
 	}
@@ -684,7 +756,7 @@ func (ctx *prepareCtx) getTypeName(elemT reflect.Type) string {
 	return alias
 }
 
-func (ctx *prepareCtx) buildDecLine(typeName, fieldName, ending string, t reflect.Type) string {
+func (ctx *context) buildDecLine(typeName, fieldName, ending string, t reflect.Type) string {
 	if len(t.PkgPath()) == 0 {
 		return fmt.Sprintf("%s = %s(codonDecode%s(bz, &n, &err))%s", fieldName, strings.ToLower(typeName), typeName, ending)
 	}
@@ -692,7 +764,7 @@ func (ctx *prepareCtx) buildDecLine(typeName, fieldName, ending string, t reflec
 	return fmt.Sprintf("%s = %s(codonDecode%s(bz, &n, &err))%s", fieldName, alias, typeName, ending)
 }
 
-func (ctx *prepareCtx) genFieldDecLines(t reflect.Type, lines *[]string, fieldName string, iterLevel int) bool {
+func (ctx *context) genFieldDecLines(t reflect.Type, lines *[]string, fieldName string, iterLevel int) bool {
 	ending := "\nif err != nil {return v, total, err}\nbz = bz[n:]\ntotal+=n"
 	needLength := false
 	isPtr := false
@@ -757,7 +829,7 @@ func (ctx *prepareCtx) genFieldDecLines(t reflect.Type, lines *[]string, fieldNa
 			makeSlice := fmt.Sprintf("%s = make([]%s, length)", fieldName, typeName)
 			*lines = append(*lines, makeSlice)
 		}
-		if elemT.Kind() == reflect.Uint8 && t.Kind() == reflect.Slice {
+		if t.Kind() == reflect.Slice && elemT.Kind() == reflect.Uint8 {
 			line = fmt.Sprintf("%s, n, err = codonGetByteSlice(bz, length)%s", fieldName, ending)
 		} else {
 			iterVar := fmt.Sprintf("_%d", iterLevel)
@@ -807,7 +879,7 @@ func (ctx *prepareCtx) genFieldDecLines(t reflect.Type, lines *[]string, fieldNa
 	return needLength
 }
 
-func (ctx *prepareCtx) initPtrMember(fieldName string, t reflect.Type) string {
+func (ctx *context) initPtrMember(fieldName string, t reflect.Type) string {
 	typePath := t.PkgPath() + "." + t.Name()
 	alias, ok := ctx.structPath2Alias[typePath]
 	if !ok {
@@ -819,7 +891,7 @@ func (ctx *prepareCtx) initPtrMember(fieldName string, t reflect.Type) string {
 	return fmt.Sprintf("%s = &%s{}", fieldName, alias)
 }
 
-func (ctx *prepareCtx) genStructDecLines(t reflect.Type, lines *[]string, varName string, iterLevel int) bool {
+func (ctx *context) genStructDecLines(t reflect.Type, lines *[]string, varName string, iterLevel int) bool {
 	needLength := false
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
@@ -831,7 +903,7 @@ func (ctx *prepareCtx) genStructDecLines(t reflect.Type, lines *[]string, varNam
 
 //======================
 
-func (ctx *prepareCtx) buildRandLine(typeName, fieldName string, t reflect.Type) string {
+func (ctx *context) buildRandLine(typeName, fieldName string, t reflect.Type) string {
 	if len(t.PkgPath()) == 0 {
 		return fmt.Sprintf("%s = r.Get%s()", fieldName, typeName)
 	}
@@ -839,7 +911,7 @@ func (ctx *prepareCtx) buildRandLine(typeName, fieldName string, t reflect.Type)
 	return fmt.Sprintf("%s = %s(r.Get%s())", fieldName, alias, typeName)
 }
 
-func (ctx *prepareCtx) genFieldRandLines(t reflect.Type, lines *[]string, fieldName string, iterLevel int) bool {
+func (ctx *context) genFieldRandLines(t reflect.Type, lines *[]string, fieldName string, iterLevel int) bool {
 	needLength := false
 	isPtr := false
 	if t.Kind() == reflect.Ptr {
@@ -906,7 +978,7 @@ func (ctx *prepareCtx) genFieldRandLines(t reflect.Type, lines *[]string, fieldN
 			makeSlice := fmt.Sprintf("%s = make([]%s, length)", fieldName, typeName)
 			*lines = append(*lines, makeSlice)
 		}
-		if elemT.Kind() == reflect.Uint8 && t.Kind() == reflect.Slice {
+		if t.Kind() == reflect.Slice && elemT.Kind() == reflect.Uint8 {
 			line = fmt.Sprintf("%s = r.GetBytes(length)", fieldName)
 		} else {
 			iterVar := fmt.Sprintf("_%d", iterLevel)
@@ -956,7 +1028,7 @@ func (ctx *prepareCtx) genFieldRandLines(t reflect.Type, lines *[]string, fieldN
 	return needLength
 }
 
-func (ctx *prepareCtx) genStructRandLines(t reflect.Type, lines *[]string, varName string, iterLevel int) bool {
+func (ctx *context) genStructRandLines(t reflect.Type, lines *[]string, varName string, iterLevel int) bool {
 	needLength := false
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
@@ -966,207 +1038,108 @@ func (ctx *prepareCtx) genStructRandLines(t reflect.Type, lines *[]string, varNa
 	return needLength
 }
 
-var headerLogics = `
-func codonEncodeBool(w io.Writer, v bool) error {
-	slice := []byte{0}
-	if v {
-		slice = []byte{1}
+//===================================================================
+
+func (ctx *context) genFieldDeepCopyLines(t reflect.Type, lines *[]string, fieldName string, iterLevel int) bool {
+	needLength := false
+	isPtr := false
+	if t.Kind() == reflect.Ptr {
+		isPtr = true
+		elemT := t.Elem()
+		if elemT.Kind() == reflect.Struct {
+			t = elemT
+		} else {
+			panic(fmt.Sprintf("Pointer to %s is not supported", elemT.Kind()))
+		}
 	}
-	_, err := w.Write(slice)
-	return err
-}
-func codonEncodeVarint(w io.Writer, v int64) error {
-	var buf [10]byte
-	n := binary.PutVarint(buf[:], v)
-	_, err := w.Write(buf[0:n])
-	return err
-}
-func codonEncodeInt8(w io.Writer, v int8) error {
-	_, err := w.Write([]byte{byte(v)})
-	return err
-}
-func codonEncodeInt16(w io.Writer, v int16) error {
-	var buf [2]byte
-	binary.LittleEndian.PutUint16(buf[:], uint16(v))
-	_, err := w.Write(buf[:])
-	return err
-}
-func codonEncodeUvarint(w io.Writer, v uint64) error {
-	var buf [10]byte
-	n := binary.PutUvarint(buf[:], v)
-	_, err := w.Write(buf[0:n])
-	return err
-}
-func codonEncodeUint8(w io.Writer, v uint8) error {
-	_, err := w.Write([]byte{byte(v)})
-	return err
-}
-func codonEncodeUint16(w io.Writer, v uint16) error {
-	var buf [2]byte
-	binary.LittleEndian.PutUint16(buf[:], v)
-	_, err := w.Write(buf[:])
-	return err
-}
-func codonEncodeFloat32(w io.Writer, v float32) error {
-	var buf [4]byte
-	binary.LittleEndian.PutUint32(buf[:], math.Float32bits(v))
-	_, err := w.Write(buf[:])
-	return err
-}
-func codonEncodeFloat64(w io.Writer, v float64) error {
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], math.Float64bits(v))
-	_, err := w.Write(buf[:])
-	return err
-}
-func codonEncodeByteSlice(w io.Writer, v []byte) error {
-	err := codonEncodeVarint(w, int64(len(v)))
-	if err != nil {
-		return err
+	var line string
+	switch t.Kind() {
+	case reflect.Chan:
+		panic("Channel is not supported")
+	case reflect.Func:
+		panic("Func is not supported")
+	case reflect.Uintptr:
+		panic("Uintptr is not supported")
+	case reflect.Complex64:
+		panic("Complex64 is not supported")
+	case reflect.Complex128:
+		panic("Complex128 is not supported")
+	case reflect.Map:
+		panic("Map is not supported")
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16,
+	reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8,
+	reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Float32,
+	reflect.Float64, reflect.String:
+		line = fmt.Sprintf("out%s = in%s", fieldName, fieldName)
+	case reflect.Array, reflect.Slice:
+		line = fmt.Sprintf("length = len(in%s)", fieldName)
+		needLength = true
+		*lines = append(*lines, line)
+		typeName := ctx.getTypeName(t.Elem())
+		elemT := t.Elem()
+		if t.Kind() == reflect.Slice {
+			makeSlice := fmt.Sprintf("out%s = make([]%s, length)", fieldName, typeName)
+			*lines = append(*lines, makeSlice)
+		}
+		if elemT.Kind() == reflect.Uint8 && t.Kind() == reflect.Slice {
+			line = fmt.Sprintf("copy(out%s[:], in%s[:])", fieldName, fieldName)
+		} else {
+			iterVar := fmt.Sprintf("_%d", iterLevel)
+			initVar := fmt.Sprintf("%s, length_%d := 0, length", iterVar, iterLevel)
+			line = fmt.Sprintf("for %s; %s<length_%d; %s++ { //%s of %s",
+				initVar, iterVar, iterLevel, iterVar, t.Kind(), t.Elem().Kind())
+			*lines = append(*lines, line)
+			if t.Elem().Kind() == reflect.Interface || t.Elem().Kind() == reflect.Struct {
+				line = fmt.Sprintf("out%s[%s] = DeepCopy%s(in%s[%s])", fieldName, iterVar, typeName, fieldName, iterVar)
+				*lines = append(*lines, line)
+			} else {
+				varName := fieldName + "[" + iterVar + "]"
+				nl := ctx.genFieldDeepCopyLines(elemT, lines, varName, iterLevel+1)
+				needLength = needLength || nl
+			}
+			line = "}"
+		}
+	case reflect.Interface:
+		typePath := t.PkgPath() + "." + t.Name()
+		alias, ok := ctx.ifcPath2Alias[typePath]
+		if !ok {
+			panic("Cannot find alias for:" + typePath)
+		}
+		line = fmt.Sprintf("out%s = DeepCopy%s(in%s)", fieldName, alias, fieldName)
+	case reflect.Ptr:
+		panic("Should not reach here")
+	case reflect.Struct:
+		if _, ok := ctx.leafTypes[t.PkgPath()+"."+t.Name()]; ok {
+			if isPtr {
+				*lines = append(*lines, ctx.initPtrMember("out"+fieldName, t))
+				line = fmt.Sprintf("*(out%s) = DeepCopy%s(*(in%s))", fieldName, t.Name(), fieldName)
+			} else {
+				line = fmt.Sprintf("out%s = DeepCopy%s(in%s)", fieldName, t.Name(), fieldName)
+			}
+		} else {
+			if isPtr {
+				*lines = append(*lines, ctx.initPtrMember("out"+fieldName, t))
+			}
+			nl := ctx.genStructDeepCopyLines(t, lines, fieldName, iterLevel)
+			needLength = needLength || nl
+			line = "// end of " + fieldName
+		}
+	default:
+		panic(fmt.Sprintf("Unknown Kind %s", t.Kind()))
 	}
-	_, err = w.Write(v)
-	return err
+	*lines = append(*lines, line)
+	return needLength
 }
-func codonEncodeString(w io.Writer, v string) error {
-	return codonEncodeByteSlice(w, []byte(v))
-}
-func codonDecodeBool(bz []byte, n *int, err *error) bool {
-	if len(bz) < 1 {
-		*err = errors.New("Not enough bytes to read")
-		return false
+
+
+func (ctx *context) genStructDeepCopyLines(t reflect.Type, lines *[]string, fieldPrefix string, iterLevel int) bool {
+	needLength := false
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		newPrefix := fieldPrefix+"."+field.Name
+		nl := ctx.genFieldDeepCopyLines(field.Type, lines, newPrefix, iterLevel)
+		needLength = needLength || nl
 	}
-	*n = 1
-	*err = nil
-	return bz[0]!=0
+	return needLength
 }
-func codonDecodeInt(bz []byte, m *int, err *error) int {
-	i, n := binary.Varint(bz)
-	if n == 0 {
-		// buf too small
-		*err = errors.New("buffer too small")
-	} else if n < 0 {
-		// value larger than 64 bits (overflow)
-		// and -n is the number of bytes read
-		n = -n
-		*err = errors.New("EOF decoding varint")
-	}
-	*m = n
-	return int(i)
-}
-func codonDecodeInt8(bz []byte, n *int, err *error) int8 {
-	if len(bz) < 1 {
-		*err = errors.New("Not enough bytes to read")
-		return 0
-	}
-	*err = nil
-	*n = 1
-	return int8(bz[0])
-}
-func codonDecodeInt16(bz []byte, n *int, err *error) int16 {
-	if len(bz) < 2 {
-		*err = errors.New("Not enough bytes to read")
-		return 0
-	}
-	*n = 2
-	*err = nil
-	return int16(binary.LittleEndian.Uint16(bz[:2]))
-}
-func codonDecodeInt32(bz []byte, n *int, err *error) int32 {
-	i := codonDecodeInt64(bz, n, err)
-	return int32(i)
-}
-func codonDecodeInt64(bz []byte, m *int, err *error) int64 {
-	i, n := binary.Varint(bz)
-	if n == 0 {
-		// buf too small
-		*err = errors.New("buffer too small")
-	} else if n < 0 {
-		// value larger than 64 bits (overflow)
-		// and -n is the number of bytes read
-		n = -n
-		*err = errors.New("EOF decoding varint")
-	}
-	*m = n
-	*err = nil
-	return int64(i)
-}
-func codonDecodeUint(bz []byte, n *int, err *error) uint {
-	i := codonDecodeUint64(bz, n, err)
-	return uint(i)
-}
-func codonDecodeUint8(bz []byte, n *int, err *error) uint8 {
-	if len(bz) < 1 {
-		*err = errors.New("Not enough bytes to read")
-		return 0
-	}
-	*n = 1
-	*err = nil
-	return uint8(bz[0])
-}
-func codonDecodeUint16(bz []byte, n *int, err *error) uint16 {
-	if len(bz) < 2 {
-		*err = errors.New("Not enough bytes to read")
-		return 0
-	}
-	*n = 2
-	*err = nil
-	return uint16(binary.LittleEndian.Uint16(bz[:2]))
-}
-func codonDecodeUint32(bz []byte, n *int, err *error) uint32 {
-	i := codonDecodeUint64(bz, n, err)
-	return uint32(i)
-}
-func codonDecodeUint64(bz []byte, m *int, err *error) uint64 {
-	i, n := binary.Uvarint(bz)
-	if n == 0 {
-		// buf too small
-		*err = errors.New("buffer too small")
-	} else if n < 0 {
-		// value larger than 64 bits (overflow)
-		// and -n is the number of bytes read
-		n = -n
-		*err = errors.New("EOF decoding varint")
-	}
-	*m = n
-	*err = nil
-	return uint64(i)
-}
-func codonDecodeFloat64(bz []byte, n *int, err *error) float64 {
-	if len(bz) < 8 {
-		*err = errors.New("Not enough bytes to read")
-		return 0
-	}
-	*n = 8
-	*err = nil
-	i := binary.LittleEndian.Uint64(bz[:8])
-	return math.Float64frombits(i)
-}
-func codonDecodeFloat32(bz []byte, n *int, err *error) float32 {
-	if len(bz) < 4 {
-		*err = errors.New("Not enough bytes to read")
-		return 0
-	}
-	*n = 4
-	*err = nil
-	i := binary.LittleEndian.Uint32(bz[:4])
-	return math.Float32frombits(i)
-}
-func codonGetByteSlice(bz []byte, length int) ([]byte, int, error) {
-	if len(bz) < length {
-		return nil, 0, errors.New("Not enough bytes to read")
-	}
-	return bz[:length], length, nil
-}
-func codonDecodeString(bz []byte, n *int, err *error) string {
-	var m int
-	length := codonDecodeInt64(bz, &m, err)
-	if *err != nil {
-		return ""
-	}
-	var bs []byte
-	var l int
-	bs, l, *err = codonGetByteSlice(bz[m:], int(length))
-	*n = m + l
-	return string(bs)
-}
-`
+
