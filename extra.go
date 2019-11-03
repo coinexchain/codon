@@ -19,68 +19,55 @@ type RandSrc interface {
 	GetBytes(n int) []byte
 }
 
-func codonEncodeBool(w io.Writer, v bool) error {
-	slice := []byte{0}
+func codonEncodeBool(w *[]byte, v bool) {
 	if v {
-		slice = []byte{1}
+		*w = append(*w, byte(1))
+	} else {
+		*w = append(*w, byte(0))
 	}
-	_, err := w.Write(slice)
-	return err
 }
-func codonEncodeVarint(w io.Writer, v int64) error {
+func codonEncodeVarint(w *[]byte, v int64) {
 	var buf [10]byte
 	n := binary.PutVarint(buf[:], v)
-	_, err := w.Write(buf[0:n])
-	return err
+	*w = append(*w, buf[0:n]...)
 }
-func codonEncodeInt8(w io.Writer, v int8) error {
-	_, err := w.Write([]byte{byte(v)})
-	return err
+func codonEncodeInt8(w *[]byte, v int8) {
+	*w = append(*w, byte(v))
 }
-func codonEncodeInt16(w io.Writer, v int16) error {
+func codonEncodeInt16(w *[]byte, v int16) {
 	var buf [2]byte
 	binary.LittleEndian.PutUint16(buf[:], uint16(v))
-	_, err := w.Write(buf[:])
-	return err
+	*w = append(*w, buf[:]...)
 }
-func codonEncodeUvarint(w io.Writer, v uint64) error {
+func codonEncodeUvarint(w *[]byte, v uint64) {
 	var buf [10]byte
 	n := binary.PutUvarint(buf[:], v)
-	_, err := w.Write(buf[0:n])
-	return err
+	*w = append(*w, buf[0:n]...)
 }
-func codonEncodeUint8(w io.Writer, v uint8) error {
-	_, err := w.Write([]byte{byte(v)})
-	return err
+func codonEncodeUint8(w *[]byte, v uint8) {
+	*w = append(*w, byte(v))
 }
-func codonEncodeUint16(w io.Writer, v uint16) error {
+func codonEncodeUint16(w *[]byte, v uint16) {
 	var buf [2]byte
 	binary.LittleEndian.PutUint16(buf[:], v)
-	_, err := w.Write(buf[:])
-	return err
+	*w = append(*w, buf[:]...)
 }
-func codonEncodeFloat32(w io.Writer, v float32) error {
+func codonEncodeFloat32(w *[]byte, v float32) {
 	var buf [4]byte
 	binary.LittleEndian.PutUint32(buf[:], math.Float32bits(v))
-	_, err := w.Write(buf[:])
-	return err
+	*w = append(*w, buf[:]...)
 }
-func codonEncodeFloat64(w io.Writer, v float64) error {
+func codonEncodeFloat64(w *[]byte, v float64) {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], math.Float64bits(v))
-	_, err := w.Write(buf[:])
-	return err
+	*w = append(*w, buf[:]...)
 }
-func codonEncodeByteSlice(w io.Writer, v []byte) error {
-	err := codonEncodeVarint(w, int64(len(v)))
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(v)
-	return err
+func codonEncodeByteSlice(w *[]byte, v []byte) {
+	codonEncodeVarint(w, int64(len(v)))
+	*w = append(*w, v...)
 }
-func codonEncodeString(w io.Writer, v string) error {
-	return codonEncodeByteSlice(w, []byte(v))
+func codonEncodeString(w *[]byte, v string) {
+	codonEncodeByteSlice(w, []byte(v))
 }
 func codonDecodeBool(bz []byte, n *int, err *error) bool {
 	if len(bz) < 1 {
@@ -222,3 +209,4 @@ func codonDecodeString(bz []byte, n *int, err *error) string {
 	return string(bs)
 }
 `
+

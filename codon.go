@@ -186,7 +186,7 @@ func GenerateCodecFile(
 	for _, p := range extraImports {
 		w.Write([]byte(p + "\n"))
 	}
-	w.Write([]byte("\"io\"\n\"encoding/binary\"\n\"math\"\n\"errors\"\n)\n"))
+	w.Write([]byte("\"encoding/binary\"\n\"math\"\n\"errors\"\n)\n"))
 	w.Write([]byte(headerLogics))
 	w.Write([]byte(extraLogics))
 
@@ -228,14 +228,8 @@ func GenerateCodecFile(
 	// Top-level encode function, which supports all the registered types. It writes magic bytes at the beginning
 	lines = generateIfcEncodeFunc("EncodeAny", aliases)
 	writeLines(w, lines)
-	// Top-level encode function, which supports all the registered types. It does NOT writes magic bytes
-	lines = generateBareEncodeAnyFunc(aliases)
-	writeLines(w, lines)
 	// Top-level decode function, which supports all the registered types. It uses magic bytes to decide type
 	lines = ctx.generateDecodeAnyFunc()
-	writeLines(w, lines)
-	// Top-level decode function, which supports all the registered types. It regards input pointer's type.
-	lines = generateBareDecodeAnyFunc(aliases)
 	writeLines(w, lines)
 	// Fill an interface object, randomly select the underlying struct type and randomly fill the fields
 	lines, aliases = generateIfcRandFunc("RandAny", "interface{}", aliases, nil)
@@ -281,16 +275,16 @@ func newContext(leafTypes, ignoreImpl map[string]string) *context {
 
 func generateIfcEncodeFunc(funcName string, aliases []string) []string {
 	lines := make([]string, 0, 1000)
-	lines = append(lines, "func "+funcName+"(w io.Writer, x interface{}) error {")
+	lines = append(lines, "func "+funcName+"(w *[]byte, x interface{}) {")
 	lines = append(lines, "switch v := x.(type) {")
 	for _, alias := range aliases {
 		lines = append(lines, fmt.Sprintf("case %s:", alias))
-		lines = append(lines, fmt.Sprintf("w.Write(getMagicBytes(\"%s\"))", alias))
-		lines = append(lines, fmt.Sprintf("return Encode%s(w, v)", alias))
+		lines = append(lines, fmt.Sprintf("*w = append(*w, getMagicBytes(\"%s\")...)", alias))
+		lines = append(lines, fmt.Sprintf("Encode%s(w, v)", alias))
 
 		lines = append(lines, fmt.Sprintf("case *%s:", alias))
-		lines = append(lines, fmt.Sprintf("w.Write(getMagicBytes(\"%s\"))", alias))
-		lines = append(lines, fmt.Sprintf("return Encode%s(w, *v)", alias))
+		lines = append(lines, fmt.Sprintf("*w = append(*w, getMagicBytes(\"%s\")...)", alias))
+		lines = append(lines, fmt.Sprintf("Encode%s(w, *v)", alias))
 	}
 	lines = append(lines, "default:")
 	lines = append(lines, "panic(\"Unknown Type.\")")
@@ -368,40 +362,6 @@ func generateIfcDecodeFunc(funcName, decType string, alias2bytes map[string]Magi
 	lines = append(lines, "return v, n, nil")
 	lines = append(lines, "} // end of "+funcName)
 	return lines, aliases
-}
-
-func generateBareEncodeAnyFunc(aliases []string) []string {
-	lines := make([]string, 0, 1000)
-	lines = append(lines, "func BareEncodeAny(w io.Writer, x interface{}) error {")
-	lines = append(lines, "switch v := x.(type) {")
-	for _, alias := range aliases {
-		lines = append(lines, fmt.Sprintf("case %s:", alias))
-		lines = append(lines, fmt.Sprintf("return Encode%s(w, v)", alias))
-
-		lines = append(lines, fmt.Sprintf("case *%s:", alias))
-		lines = append(lines, fmt.Sprintf("return Encode%s(w, *v)", alias))
-	}
-	lines = append(lines, "default:")
-	lines = append(lines, "panic(\"Unknown Type.\")")
-	lines = append(lines, "} // end of switch")
-	lines = append(lines, "} // end of func")
-	return lines
-}
-
-func generateBareDecodeAnyFunc(aliases []string) []string {
-	lines := make([]string, 0, 1000)
-	lines = append(lines, "func BareDecodeAny(bz []byte, x interface{}) (n int, err error) {")
-	lines = append(lines, "switch v := x.(type) {")
-	for _, alias := range aliases {
-		lines = append(lines, fmt.Sprintf("case *%s:", alias))
-		lines = append(lines, fmt.Sprintf("*v, n, err = Decode%s(bz)", alias))
-	}
-	lines = append(lines, "default:")
-	lines = append(lines, "panic(\"Unknown type\")")
-	lines = append(lines, "} // end of switch")
-	lines = append(lines, "return")
-	lines = append(lines, "} // end of DecodeVar")
-	return lines
 }
 
 func (ctx *context) generateMagicBytesFunc() []string {
@@ -524,15 +484,13 @@ func (ctx *context) generateStructFunc(alias string, t reflect.Type) []string {
 	lines := make([]string, 0, 1000)
 
 	// Encode
-	line := fmt.Sprintf("func Encode%s(w io.Writer, v %s) error {", alias, alias)
+	line := fmt.Sprintf("func Encode%s(w *[]byte, v %s) {", alias, alias)
 	lines = append(lines, line)
-	lines = append(lines, "var err error")
 	if t.Kind() == reflect.Struct {
 		ctx.genStructEncLines(t, &lines, "v", 0)
 	} else {
 		ctx.genFieldEncLines(t, &lines, "v", 0)
 	}
-	lines = append(lines, "return nil")
 	lines = append(lines, "} //End of Encode"+alias+"\n")
 
 	// Decode
@@ -603,7 +561,6 @@ func (ctx *context) generateStructFunc(alias string, t reflect.Type) []string {
 //====================================================================
 
 func (ctx *context) genFieldEncLines(t reflect.Type, lines *[]string, fieldName string, iterLevel int) {
-	ending := "\nif err != nil {return err}"
 	isPtr := false
 	if t.Kind() == reflect.Ptr {
 		isPtr = true
@@ -631,70 +588,70 @@ func (ctx *context) genFieldEncLines(t reflect.Type, lines *[]string, fieldName 
 
 	case reflect.Bool:
 		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("err = codonEncodeBool(w, %s)%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeBool(w, %s)", fieldName)
 		} else {
-			line = fmt.Sprintf("err = codonEncodeBool(w, bool(%s))%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeBool(w, bool(%s))", fieldName)
 		}
 	case reflect.Int:
-		line = fmt.Sprintf("err = codonEncodeVarint(w, int64(%s))%s", fieldName, ending)
+		line = fmt.Sprintf("codonEncodeVarint(w, int64(%s))", fieldName)
 	case reflect.Int8:
 		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("err = codonEncodeInt8(w, %s)%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeInt8(w, %s)", fieldName)
 		} else {
-			line = fmt.Sprintf("err = codonEncodeInt8(w, int8(%s))%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeInt8(w, int8(%s))", fieldName)
 		}
 	case reflect.Int16:
 		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("err = codonEncodeInt16(w, %s)%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeInt16(w, %s)", fieldName)
 		} else {
-			line = fmt.Sprintf("err = codonEncodeInt16(w, int16(%s))%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeInt16(w, int16(%s))", fieldName)
 		}
 	case reflect.Int32:
-		line = fmt.Sprintf("err = codonEncodeVarint(w, int64(%s))%s", fieldName, ending)
+		line = fmt.Sprintf("codonEncodeVarint(w, int64(%s))", fieldName)
 	case reflect.Int64:
-		line = fmt.Sprintf("err = codonEncodeVarint(w, int64(%s))%s", fieldName, ending)
+		line = fmt.Sprintf("codonEncodeVarint(w, int64(%s))", fieldName)
 	case reflect.Uint:
-		line = fmt.Sprintf("err = codonEncodeUvarint(w, uint64(%s))%s", fieldName, ending)
+		line = fmt.Sprintf("codonEncodeUvarint(w, uint64(%s))", fieldName)
 	case reflect.Uint8:
 		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("err = codonEncodeUint8(w, %s)%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeUint8(w, %s)", fieldName)
 		} else {
-			line = fmt.Sprintf("err = codonEncodeUint8(w, uint8(%s))%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeUint8(w, uint8(%s))", fieldName)
 		}
 	case reflect.Uint16:
 		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("err = codonEncodeUint16(w, %s)%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeUint16(w, %s)", fieldName)
 		} else {
-			line = fmt.Sprintf("err = codonEncodeUint16(w, uint16(%s))%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeUint16(w, uint16(%s))", fieldName)
 		}
 	case reflect.Uint32:
-		line = fmt.Sprintf("err = codonEncodeUvarint(w, uint64(%s))%s", fieldName, ending)
+		line = fmt.Sprintf("codonEncodeUvarint(w, uint64(%s))", fieldName)
 	case reflect.Uint64:
-		line = fmt.Sprintf("err = codonEncodeUvarint(w, uint64(%s))%s", fieldName, ending)
+		line = fmt.Sprintf("codonEncodeUvarint(w, uint64(%s))", fieldName)
 	case reflect.Float32:
 		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("err = codonEncodeFloat32(w, %s)%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeFloat32(w, %s)", fieldName)
 		} else {
-			line = fmt.Sprintf("err = codonEncodeFloat32(w, float32(%s))%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeFloat32(w, float32(%s))", fieldName)
 		}
 	case reflect.Float64:
 		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("err = codonEncodeFloat64(w, %s)%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeFloat64(w, %s)", fieldName)
 		} else {
-			line = fmt.Sprintf("err = codonEncodeFloat64(w, float64(%s))%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeFloat64(w, float64(%s))", fieldName)
 		}
 	case reflect.String:
 		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("err = codonEncodeString(w, %s)%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeString(w, %s)", fieldName)
 		} else {
-			line = fmt.Sprintf("err = codonEncodeString(w, string(%s))%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeString(w, string(%s))", fieldName)
 		}
 	case reflect.Array, reflect.Slice:
 		elemT := t.Elem()
 		if elemT.Kind() == reflect.Uint8 {
-			line = fmt.Sprintf("err = codonEncodeByteSlice(w, %s[:])%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeByteSlice(w, %s[:])", fieldName)
 		} else {
-			line = fmt.Sprintf("err = codonEncodeVarint(w, int64(len(%s)))%s", fieldName, ending)
+			line = fmt.Sprintf("codonEncodeVarint(w, int64(len(%s)))", fieldName)
 			*lines = append(*lines, line)
 			iterVar := fmt.Sprintf("_%d", iterLevel)
 			line = fmt.Sprintf("for %s:=0; %s<len(%s); %s++ {",
@@ -710,7 +667,7 @@ func (ctx *context) genFieldEncLines(t reflect.Type, lines *[]string, fieldName 
 		if !ok {
 			panic("Cannot find alias for:" + typePath)
 		}
-		line = fmt.Sprintf("err = Encode%s(w, %s)%s // interface_encode", alias, fieldName, ending)
+		line = fmt.Sprintf("Encode%s(w, %s) // interface_encode", alias, fieldName)
 	case reflect.Ptr:
 		panic("Should not reach here")
 	case reflect.Struct:
@@ -718,7 +675,7 @@ func (ctx *context) genFieldEncLines(t reflect.Type, lines *[]string, fieldName 
 			if isPtr {
 				fieldName = "*(" + fieldName + ")"
 			}
-			line = fmt.Sprintf("err = Encode%s(w, %s)%s", t.Name(), fieldName, ending)
+			line = fmt.Sprintf("Encode%s(w, %s)", t.Name(), fieldName)
 		} else {
 			ctx.genStructEncLines(t, lines, fieldName, iterLevel)
 			line = "// end of " + fieldName
