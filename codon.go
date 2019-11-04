@@ -215,7 +215,7 @@ func GenerateCodecFile(
 			writeLines(w, lines)
 		}
 	}
-	// Generate the "getMagicBytes" function, which maps aliases to magic bytes
+	// Generate the "getMagicBytes" and "getMagicBytesOfVar" functions, which maps aliases to magic bytes
 	lines := ctx.generateMagicBytesFunc()
 	writeLines(w, lines)
 
@@ -383,6 +383,19 @@ func (ctx *context) generateMagicBytesFunc() []string {
 	lines = append(lines, "panic(\"Should not reach here\")")
 	lines = append(lines, "return []byte{}")
 	lines = append(lines, "} // end of getMagicBytes")
+
+	lines = append(lines, "func getMagicBytesOfVar(x interface{}) ([4]byte, error) {")
+	lines = append(lines, "switch x.(type) {")
+	for _, alias := range aliases {
+		lines = append(lines, fmt.Sprintf("case *%s, %s:", alias, alias))
+		magicBytes := ctx.structAlias2MagicBytes[alias]
+		lines = append(lines, fmt.Sprintf("return [4]byte{%d,%d,%d,%d}, nil",
+			magicBytes[0], magicBytes[1], magicBytes[2], magicBytes[3]))
+	}
+	lines = append(lines, "default:")
+	lines = append(lines, "return [4]byte{0,0,0,0}, errors.New(\"Unknown Type\")")
+	lines = append(lines, "} // end of switch")
+	lines = append(lines, "} // end of func")
 	return lines
 }
 
