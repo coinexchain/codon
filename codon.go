@@ -226,7 +226,7 @@ func GenerateCodecFile(
 	}
 	sort.Strings(aliases)
 	// Top-level encode function, which supports all the registered types. It writes magic bytes at the beginning
-	lines = generateIfcEncodeFunc("EncodeAny", aliases)
+	lines = ctx.generateIfcEncodeFunc("EncodeAny", aliases)
 	writeLines(w, lines)
 	// Top-level decode function, which supports all the registered types. It uses magic bytes to decide type
 	lines = ctx.generateDecodeAnyFunc()
@@ -235,7 +235,7 @@ func GenerateCodecFile(
 	lines, aliases = generateIfcRandFunc("RandAny", "interface{}", aliases, nil)
 	writeLines(w, lines)
 	// DeepCopy an interface object
-	lines = generateIfcDeepCopyFunc("DeepCopyAny", "interface{}", aliases)
+	lines = ctx.generateIfcDeepCopyFunc("DeepCopyAny", "interface{}", aliases)
 	writeLines(w, lines)
 	// Generate a GetSupportList function which returns the sorted full path list of all the supported types
 	lines = ctx.generateSupportListFunc()
@@ -244,6 +244,7 @@ func GenerateCodecFile(
 
 type context struct {
 	structPath2Alias map[string]string
+	structAlias2Path map[string]string
 	ifcPath2Alias    map[string]string
 	structPath2Type  map[string]reflect.Type
 	ifcPath2Type     map[string]reflect.Type
@@ -261,6 +262,7 @@ type context struct {
 func newContext(leafTypes, ignoreImpl map[string]string) *context {
 	return &context{
 		structPath2Alias: make(map[string]string),
+		structAlias2Path: make(map[string]string),
 		ifcPath2Alias:    make(map[string]string),
 		structPath2Type:  make(map[string]reflect.Type),
 		ifcPath2Type:     make(map[string]reflect.Type),
@@ -273,18 +275,33 @@ func newContext(leafTypes, ignoreImpl map[string]string) *context {
 	}
 }
 
-func generateIfcEncodeFunc(funcName string, aliases []string) []string {
+var pathCmd = `
+t := reflect.TypeOf(x)
+path:=""
+if t.Kind() == reflect.Ptr {
+t = t.Elem()
+path="*"
+}
+path = path + t.PkgPath() + "." + t.Name()
+`
+
+func (ctx *context) generateIfcEncodeFunc(funcName string, aliases []string) []string {
 	lines := make([]string, 0, 1000)
 	lines = append(lines, "func "+funcName+"(w *[]byte, x interface{}) {")
-	lines = append(lines, "switch v := x.(type) {")
+	lines = append(lines, pathCmd)
+	lines = append(lines, "switch path {")
 	for _, alias := range aliases {
-		lines = append(lines, fmt.Sprintf("case %s:", alias))
+		path, ok := ctx.structAlias2Path[alias]
+		if !ok {
+			panic("No path for "+alias)
+		}
+		lines = append(lines, fmt.Sprintf("case \"%s\":", path))
 		lines = append(lines, fmt.Sprintf("*w = append(*w, getMagicBytes(\"%s\")...)", alias))
-		lines = append(lines, fmt.Sprintf("Encode%s(w, v)", alias))
+		lines = append(lines, fmt.Sprintf("Encode%s(w, x.(%s))", alias, alias))
 
-		lines = append(lines, fmt.Sprintf("case *%s:", alias))
+		lines = append(lines, fmt.Sprintf("case \"*%s\":", path))
 		lines = append(lines, fmt.Sprintf("*w = append(*w, getMagicBytes(\"%s\")...)", alias))
-		lines = append(lines, fmt.Sprintf("Encode%s(w, *v)", alias))
+		lines = append(lines, fmt.Sprintf("Encode%s(w, *(x.(*%s)))", alias, alias))
 	}
 	lines = append(lines, "default:")
 	lines = append(lines, "panic(\"Unknown Type.\")")
@@ -314,15 +331,20 @@ func generateIfcRandFunc(funcName, ifc string, aliases []string, ignoreImpl map[
 	return lines, newAliases
 }
 
-func generateIfcDeepCopyFunc(funcName, ifc string, aliases []string) []string {
+func (ctx *context) generateIfcDeepCopyFunc(funcName, ifc string, aliases []string) []string {
 	lines := make([]string, 0, 1000)
 	lines = append(lines, fmt.Sprintf("func %s(x %s) %s {", funcName, ifc, ifc))
-	lines = append(lines, "switch v := x.(type) {")
+	lines = append(lines, pathCmd)
+	lines = append(lines, "switch path {")
 	for _, alias := range aliases {
-		lines = append(lines, fmt.Sprintf("case *%s:", alias))
-		lines = append(lines, fmt.Sprintf("res := DeepCopy%s(*v)\nreturn &res", alias))
-		lines = append(lines, fmt.Sprintf("case %s:", alias))
-		lines = append(lines, fmt.Sprintf("res := DeepCopy%s(v)\nreturn &res", alias))
+		path, ok := ctx.structAlias2Path[alias]
+		if !ok {
+			panic("No path for "+alias)
+		}
+		lines = append(lines, fmt.Sprintf("case \"%s\":", path))
+		lines = append(lines, fmt.Sprintf("res := DeepCopy%s(x.(%s))\nreturn &res", alias, alias))
+		lines = append(lines, fmt.Sprintf("case \"*%s\":", path))
+		lines = append(lines, fmt.Sprintf("res := DeepCopy%s(*(x.(*%s)))\nreturn &res", alias, alias))
 	}
 	lines = append(lines, "default:")
 	lines = append(lines, "panic(\"Unknown Type.\")")
@@ -385,9 +407,14 @@ func (ctx *context) generateMagicBytesFunc() []string {
 	lines = append(lines, "} // end of getMagicBytes")
 
 	lines = append(lines, "func getMagicBytesOfVar(x interface{}) ([4]byte, error) {")
-	lines = append(lines, "switch x.(type) {")
+	lines = append(lines, pathCmd)
+	lines = append(lines, "switch path {")
 	for _, alias := range aliases {
-		lines = append(lines, fmt.Sprintf("case *%s, %s:", alias, alias))
+		path, ok := ctx.structAlias2Path[alias]
+		if !ok {
+			panic("No path for "+alias)
+		}
+		lines = append(lines, fmt.Sprintf("case \"*%s\", \"%s\":", path, path))
 		magicBytes := ctx.structAlias2MagicBytes[alias]
 		lines = append(lines, fmt.Sprintf("return [4]byte{%d,%d,%d,%d}, nil",
 			magicBytes[0], magicBytes[1], magicBytes[2], magicBytes[3]))
@@ -453,14 +480,16 @@ func (ctx *context) register(alias string, name string, v interface{}) {
 		ctx.ifcPath2Type[path] = t
 	} else {
 		ctx.structPath2Alias[path] = alias
+		ctx.structAlias2Path[alias] = path
 		ctx.structPath2Type[path] = t
+
+		magicBytes := calcMagicBytes([]string{alias, name})
+		if otherAlias, ok := ctx.magicBytes2StructAlias[magicBytes]; ok {
+			panic("Magic Bytes Conflicts: " + otherAlias + " vs " + alias)
+		}
+		ctx.structAlias2MagicBytes[alias] = magicBytes
+		ctx.magicBytes2StructAlias[magicBytes] = alias
 	}
-	magicBytes := calcMagicBytes([]string{alias, name})
-	if otherAlias, ok := ctx.magicBytes2StructAlias[magicBytes]; ok {
-		panic("Magic Bytes Conflicts: " + otherAlias + " vs " + alias)
-	}
-	ctx.structAlias2MagicBytes[alias] = magicBytes
-	ctx.magicBytes2StructAlias[magicBytes] = alias
 }
 
 func (ctx *context) generateIfcFunc(ifc string, t reflect.Type) []string {
@@ -482,9 +511,9 @@ func (ctx *context) generateIfcFunc(ifc string, t reflect.Type) []string {
 		alias2bytes[alias] = magicBytes
 	}
 	decLines, aliases := generateIfcDecodeFunc("Decode"+ifc, ifc, alias2bytes)
-	encLines := generateIfcEncodeFunc("Encode"+ifc, aliases)
+	encLines := ctx.generateIfcEncodeFunc("Encode"+ifc, aliases)
 	randLines, aliases := generateIfcRandFunc("Rand"+ifc, ifc, aliases, ctx.ignoreImpl)
-	deepcopyLines := generateIfcDeepCopyFunc("DeepCopy"+ifc, ifc, aliases)
+	deepcopyLines := ctx.generateIfcDeepCopyFunc("DeepCopy"+ifc, ifc, aliases)
 	result := make([]string, 0, len(decLines)+len(encLines)+len(randLines)+len(deepcopyLines))
 	result = append(result, decLines...)
 	result = append(result, encLines...)

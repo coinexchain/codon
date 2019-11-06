@@ -210,7 +210,7 @@ func codonDecodeString(bz []byte, n *int, err *error) string {
 }
 `
 
-var ImportsForBridgeLogic = []string{`"io"`, `"fmt"`, `"reflect"`, `"bytes"`, `"encoding/json"`, `amino "github.com/tendermint/go-amino"`}
+var ImportsForBridgeLogic = []string{`"io"`, `"fmt"`, `"reflect"`, `"encoding/json"`, `amino "github.com/tendermint/go-amino"`}
 
 var disfixWrapperDefine = "type disfixWrapper struct {\n"+
 			"	Name string          `json:\"type\"`\n"+
@@ -336,129 +336,6 @@ func derefPtr(v interface{}) reflect.Type {
 	return t
 }
 
-func _fmt(s string, args ...interface{}) []byte {
-	return []byte(fmt.Sprintf(s, args...))
-}
-
-func (cdc *CodecImp) MarshalJSON(o interface{}) ([]byte, error) {
-	rv := reflect.ValueOf(o)
-	if rv.Kind() == reflect.Invalid {
-		return []byte("null"), nil
-	}
-
-	t := derefPtr(o)
-	path := t.PkgPath() + "." + t.Name()
-	name, isRegistered := cdc.structPath2Name[path]
-
-	res := make([]byte, 0, 1024)
-
-	// Write the disfix wrapper if it is a registered concrete type.
-	if isRegistered {
-		// Part 1:
-		res = append(res, _fmt("{\"type\":\"%s\",\"value\":", name)...)
-	}
-
-	// Write the rest from rv.
-	bz, err := json.Marshal(o)
-	if err != nil {
-		return nil, err
-	}
-	res = append(res, bz...)
-
-	// disfix wrapper continued...
-	if isRegistered {
-		// Part 2:
-		res = append(res, byte('}'))
-	}
-	return res, nil
-}
-
-func (cdc *CodecImp) MarshalJSONIndent(o interface{}, prefix, indent string) ([]byte, error) {
-	bz, err := cdc.MarshalJSON(o)
-	if err != nil {
-		return nil, err
-	}
-	var out bytes.Buffer
-	err = json.Indent(&out, bz, prefix, indent)
-	if err != nil {
-		return nil, err
-	}
-	return out.Bytes(), nil
-}
-
-func (cdc *CodecImp) MustMarshalJSON(o interface{}) []byte {
-	bz, err := cdc.MarshalJSON(o)
-	if err!=nil {
-		panic(err)
-	}
-	return bz
-}
-
-// decodeInterfaceJSON helps unravel the type name and
-// the stored data, which are expected in the form:
-// {
-//    "type": "<canonical concrete type name>",
-//    "value":  {}
-// }
-func decodeInterfaceJSON(bz []byte) (name string, data []byte, err error) {
-	dfw := new(disfixWrapper)
-	err = json.Unmarshal(bz, dfw)
-	if err != nil {
-		err = fmt.Errorf("cannot parse disfix JSON wrapper: %v", err)
-		return
-	}
-
-	// Get name.
-	if dfw.Name == "" {
-		err = errors.New("JSON encoding of interfaces require non-empty type field.")
-		return
-	}
-	name = dfw.Name
-
-	// Get data.
-	if len(dfw.Data) == 0 {
-		err = errors.New("interface JSON wrapper should have non-empty value field")
-		return
-	}
-	data = dfw.Data
-	return
-}
-
-func (cdc *CodecImp) UnmarshalJSON(bz []byte, ptr interface{}) error {
-	if len(bz) == 0 {
-		return errors.New("UnmarshalJSON cannot decode empty bytes")
-	}
-
-	rv := reflect.ValueOf(ptr)
-	if rv.Kind() != reflect.Ptr {
-		return errors.New("UnmarshalJSON expects a pointer")
-	}
-
-	t := derefPtr(ptr)
-	path := t.PkgPath() + "." + t.Name()
-	structName, isRegistered := cdc.structPath2Name[path]
-
-	// If registered concrete, consume and verify type wrapper.
-	if isRegistered {
-		// Consume type wrapper info.
-		name, bz_, err := decodeInterfaceJSON(bz)
-		if err != nil {
-			return err
-		}
-		// Check name against info.
-		if name != structName {
-			return fmt.Errorf("UnmarshalJSON wants to decode a %v but found a %v", structName, name)
-		}
-		bz = bz_
-	}
-	return json.Unmarshal(bz, ptr)
-}
-func (cdc *CodecImp) MustUnmarshalJSON(bz []byte, ptr interface{}) {
-	err := cdc.UnmarshalJSON(bz, ptr)
-	if err != nil {
-		panic(err)
-	}
-}
 func (cdc *CodecImp) PrintTypes(out io.Writer) error {
 	for _, entry := range GetSupportList() {
 		_, err := out.Write([]byte(entry))
