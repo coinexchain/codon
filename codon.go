@@ -454,13 +454,13 @@ func (ctx *context) register(alias string, name string, v interface{}) {
 	} else {
 		ctx.structPath2Alias[path] = alias
 		ctx.structPath2Type[path] = t
+		magicBytes := calcMagicBytes([]string{alias, name})
+		if otherAlias, ok := ctx.magicBytes2StructAlias[magicBytes]; ok {
+			panic("Magic Bytes Conflicts: " + otherAlias + " vs " + alias)
+		}
+		ctx.structAlias2MagicBytes[alias] = magicBytes
+		ctx.magicBytes2StructAlias[magicBytes] = alias
 	}
-	magicBytes := calcMagicBytes([]string{alias, name})
-	if otherAlias, ok := ctx.magicBytes2StructAlias[magicBytes]; ok {
-		panic("Magic Bytes Conflicts: " + otherAlias + " vs " + alias)
-	}
-	ctx.structAlias2MagicBytes[alias] = magicBytes
-	ctx.magicBytes2StructAlias[magicBytes] = alias
 }
 
 func (ctx *context) generateIfcFunc(ifc string, t reflect.Type) []string {
