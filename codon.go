@@ -322,7 +322,7 @@ func generateIfcDeepCopyFunc(funcName, ifc string, aliases []string) []string {
 		lines = append(lines, fmt.Sprintf("case *%s:", alias))
 		lines = append(lines, fmt.Sprintf("res := DeepCopy%s(*v)\nreturn &res", alias))
 		lines = append(lines, fmt.Sprintf("case %s:", alias))
-		lines = append(lines, fmt.Sprintf("res := DeepCopy%s(v)\nreturn &res", alias))
+		lines = append(lines, fmt.Sprintf("res := DeepCopy%s(v)\nreturn res", alias))
 	}
 	lines = append(lines, "default:")
 	lines = append(lines, "panic(\"Unknown Type.\")")
@@ -573,7 +573,19 @@ func (ctx *context) generateStructFunc(alias string, t reflect.Type) []string {
 
 //====================================================================
 
+func isMutex(t reflect.Type) bool {
+	if t.PkgPath() == "sync" {
+		if t.Name() == "Mutex" || t.Name() == "RWMutex" {
+			return true
+		}
+	}
+	return false
+}
+
 func (ctx *context) genFieldEncLines(t reflect.Type, lines *[]string, fieldName string, iterLevel int) {
+	if isMutex(t) {
+		return
+	}
 	isPtr := false
 	if t.Kind() == reflect.Ptr {
 		isPtr = true
@@ -710,7 +722,7 @@ func (ctx *context) genStructEncLines(t reflect.Type, lines *[]string, varName s
 
 func (ctx *context) getTypeName(elemT reflect.Type) string {
 	if elemT.Kind() == reflect.Ptr {
-		panic("slice/array of pointers are not support")
+		panic("Should not reach here")
 	}
 	if len(elemT.PkgPath()) == 0 {
 		return elemT.Name() //basic type
@@ -726,6 +738,36 @@ func (ctx *context) getTypeName(elemT reflect.Type) string {
 	return alias
 }
 
+func (ctx *context) getTypeInfo(elemT reflect.Type) (string, bool) {
+	isPtr := false
+	if elemT.Kind() == reflect.Ptr {
+		elemT = elemT.Elem()
+		isPtr = true
+	}
+	if elemT.Kind() == reflect.Array {
+		panic("Do not support slice/array of arrays")
+	}
+	if elemT.Kind() == reflect.Slice {
+		if elemT.Elem().Kind() == reflect.Uint8 {
+			return "[]byte", false
+		} else {
+			panic("Do not support slice/array of slices, except for byte slices")
+		}
+	}
+	if len(elemT.PkgPath()) == 0 {
+		return elemT.Name(), isPtr //basic type
+	}
+	typePath := elemT.PkgPath() + "." + elemT.Name()
+	alias, ok := ctx.structPath2Alias[typePath]
+	if !ok {
+		alias, ok = ctx.ifcPath2Alias[typePath]
+	}
+	if !ok {
+		panic(typePath + " is not registered")
+	}
+	return alias, isPtr
+}
+
 func (ctx *context) buildDecLine(typeName, fieldName, ending string, t reflect.Type) string {
 	if len(t.PkgPath()) == 0 {
 		return fmt.Sprintf("%s = %s(codonDecode%s(bz, &n, &err))%s", fieldName, strings.ToLower(typeName), typeName, ending)
@@ -734,7 +776,22 @@ func (ctx *context) buildDecLine(typeName, fieldName, ending string, t reflect.T
 	return fmt.Sprintf("%s = %s(codonDecode%s(bz, &n, &err))%s", fieldName, alias, typeName, ending)
 }
 
+func (ctx *context) initPtrMember(fieldName string, t reflect.Type) string {
+	typePath := t.PkgPath() + "." + t.Name()
+	alias, ok := ctx.structPath2Alias[typePath]
+	if !ok {
+		alias, ok = ctx.leafTypes[typePath]
+	}
+	if !ok {
+		panic("Cannot find alias for:" + typePath)
+	}
+	return fmt.Sprintf("%s = &%s{}", fieldName, alias)
+}
+
 func (ctx *context) genFieldDecLines(t reflect.Type, lines *[]string, fieldName string, iterLevel int) bool {
+	if isMutex(t) {
+		return false
+	}
 	ending := "\nif err != nil {return v, total, err}\nbz = bz[n:]\ntotal+=n"
 	needLength := false
 	isPtr := false
@@ -793,22 +850,22 @@ func (ctx *context) genFieldDecLines(t reflect.Type, lines *[]string, fieldName 
 		line = fmt.Sprintf("length = codonDecodeInt(bz, &n, &err)%s", ending)
 		needLength = true
 		*lines = append(*lines, line)
-		typeName := ctx.getTypeName(t.Elem())
+		typeName, isPtr := ctx.getTypeInfo(t.Elem())
 		elemT := t.Elem()
-		if t.Kind() == reflect.Slice && elemT.Kind() != reflect.Uint8 {
-			makeSlice := fmt.Sprintf("%s = make([]%s, length)", fieldName, typeName)
-			*lines = append(*lines, makeSlice)
-		}
-		if t.Kind() == reflect.Slice && elemT.Kind() == reflect.Uint8 {
-			line = fmt.Sprintf("%s, n, err = codonGetByteSlice(bz, length)%s", fieldName, ending)
-		} else {
+		if isPtr {
+			if t.Kind() == reflect.Slice {
+				makeSlice := fmt.Sprintf("%s = make([]*%s, length)", fieldName, typeName)
+				*lines = append(*lines, makeSlice)
+			}
 			iterVar := fmt.Sprintf("_%d", iterLevel)
 			initVar := fmt.Sprintf("%s, length_%d := 0, length", iterVar, iterLevel)
 			line = fmt.Sprintf("for %s; %s<length_%d; %s++ { //%s of %s",
-				initVar, iterVar, iterLevel, iterVar, t.Kind(), t.Elem().Kind())
+				initVar, iterVar, iterLevel, iterVar, t.Kind(), elemT.Kind())
 			*lines = append(*lines, line)
-			if t.Elem().Kind() == reflect.Interface || t.Elem().Kind() == reflect.Struct {
-				line = fmt.Sprintf("%s[%s], n, err = Decode%s(bz)%s", fieldName, iterVar, typeName, ending)
+			if elemT.Kind() == reflect.Interface || elemT.Kind() == reflect.Struct {
+				line = fmt.Sprintf("tmp, n, err := Decode%s(bz)%s", typeName, ending)
+				*lines = append(*lines, line)
+				line = fmt.Sprintf("%s[%s] = &tmp", fieldName, iterVar)
 				*lines = append(*lines, line)
 			} else {
 				varName := fieldName + "[" + iterVar + "]"
@@ -816,6 +873,29 @@ func (ctx *context) genFieldDecLines(t reflect.Type, lines *[]string, fieldName 
 				needLength = needLength || nl
 			}
 			line = "}"
+		} else {
+			if t.Kind() == reflect.Slice && elemT.Kind() != reflect.Uint8 {
+				makeSlice := fmt.Sprintf("%s = make([]%s, length)", fieldName, typeName)
+				*lines = append(*lines, makeSlice)
+			}
+			if t.Kind() == reflect.Slice && elemT.Kind() == reflect.Uint8 {
+				line = fmt.Sprintf("%s, n, err = codonGetByteSlice(bz, length)%s", fieldName, ending)
+			} else {
+				iterVar := fmt.Sprintf("_%d", iterLevel)
+				initVar := fmt.Sprintf("%s, length_%d := 0, length", iterVar, iterLevel)
+				line = fmt.Sprintf("for %s; %s<length_%d; %s++ { //%s of %s",
+					initVar, iterVar, iterLevel, iterVar, t.Kind(), elemT.Kind())
+				*lines = append(*lines, line)
+				if elemT.Kind() == reflect.Interface || elemT.Kind() == reflect.Struct {
+					line = fmt.Sprintf("%s[%s], n, err = Decode%s(bz)%s", fieldName, iterVar, typeName, ending)
+					*lines = append(*lines, line)
+				} else {
+					varName := fieldName + "[" + iterVar + "]"
+					nl := ctx.genFieldDecLines(elemT, lines, varName, iterLevel+1)
+					needLength = needLength || nl
+				}
+				line = "}"
+			}
 		}
 	case reflect.Interface:
 		typePath := t.PkgPath() + "." + t.Name()
@@ -849,18 +929,6 @@ func (ctx *context) genFieldDecLines(t reflect.Type, lines *[]string, fieldName 
 	return needLength
 }
 
-func (ctx *context) initPtrMember(fieldName string, t reflect.Type) string {
-	typePath := t.PkgPath() + "." + t.Name()
-	alias, ok := ctx.structPath2Alias[typePath]
-	if !ok {
-		alias, ok = ctx.leafTypes[typePath]
-	}
-	if !ok {
-		panic("Cannot find alias for:" + typePath)
-	}
-	return fmt.Sprintf("%s = &%s{}", fieldName, alias)
-}
-
 func (ctx *context) genStructDecLines(t reflect.Type, lines *[]string, varName string, iterLevel int) bool {
 	needLength := false
 	for i := 0; i < t.NumField(); i++ {
@@ -882,6 +950,9 @@ func (ctx *context) buildRandLine(typeName, fieldName string, t reflect.Type) st
 }
 
 func (ctx *context) genFieldRandLines(t reflect.Type, lines *[]string, fieldName string, iterLevel int) bool {
+	if isMutex(t) {
+		return false
+	}
 	needLength := false
 	isPtr := false
 	if t.Kind() == reflect.Ptr {
@@ -934,7 +1005,12 @@ func (ctx *context) genFieldRandLines(t reflect.Type, lines *[]string, fieldName
 	case reflect.Float64:
 		line = ctx.buildRandLine("Float64", fieldName, t)
 	case reflect.String:
-		line = fmt.Sprintf("%s = r.GetString(1+int(r.GetUint()%%(MaxStringLength-1)))", fieldName)
+		if len(t.PkgPath()) == 0 {
+			line = fmt.Sprintf("%s = r.GetString(1+int(r.GetUint()%%(MaxStringLength-1)))", fieldName)
+		} else {
+			alias := ctx.getTypeName(t)
+			line = fmt.Sprintf("%s = %s(r.GetString(1+int(r.GetUint()%%(MaxStringLength-1))))", fieldName, alias)
+		}
 	case reflect.Array, reflect.Slice:
 		line = "length = 1+int(r.GetUint()%(MaxSliceLength-1))"
 		if t.Kind() == reflect.Array {
@@ -942,22 +1018,22 @@ func (ctx *context) genFieldRandLines(t reflect.Type, lines *[]string, fieldName
 		}
 		needLength = true
 		*lines = append(*lines, line)
-		typeName := ctx.getTypeName(t.Elem())
+		typeName, isPtr := ctx.getTypeInfo(t.Elem())
 		elemT := t.Elem()
-		if t.Kind() == reflect.Slice && elemT.Kind() != reflect.Uint8 {
-			makeSlice := fmt.Sprintf("%s = make([]%s, length)", fieldName, typeName)
-			*lines = append(*lines, makeSlice)
-		}
-		if t.Kind() == reflect.Slice && elemT.Kind() == reflect.Uint8 {
-			line = fmt.Sprintf("%s = r.GetBytes(length)", fieldName)
-		} else {
+		if isPtr {
+			if t.Kind() == reflect.Slice {
+				makeSlice := fmt.Sprintf("%s = make([]*%s, length)", fieldName, typeName)
+				*lines = append(*lines, makeSlice)
+			}
 			iterVar := fmt.Sprintf("_%d", iterLevel)
 			initVar := fmt.Sprintf("%s, length_%d := 0, length", iterVar, iterLevel)
 			line = fmt.Sprintf("for %s; %s<length_%d; %s++ { //%s of %s",
-				initVar, iterVar, iterLevel, iterVar, t.Kind(), t.Elem().Kind())
+				initVar, iterVar, iterLevel, iterVar, t.Kind(), elemT.Kind())
 			*lines = append(*lines, line)
-			if t.Elem().Kind() == reflect.Interface || t.Elem().Kind() == reflect.Struct {
-				line = fmt.Sprintf("%s[%s] = Rand%s(r)", fieldName, iterVar, typeName)
+			if elemT.Kind() == reflect.Interface || elemT.Kind() == reflect.Struct {
+				line = fmt.Sprintf("tmp := Rand%s(bz)%s", typeName)
+				*lines = append(*lines, line)
+				line = fmt.Sprintf("%s[%s] = &tmp", fieldName, iterVar)
 				*lines = append(*lines, line)
 			} else {
 				varName := fieldName + "[" + iterVar + "]"
@@ -965,6 +1041,29 @@ func (ctx *context) genFieldRandLines(t reflect.Type, lines *[]string, fieldName
 				needLength = needLength || nl
 			}
 			line = "}"
+		} else {
+			if t.Kind() == reflect.Slice && elemT.Kind() != reflect.Uint8 {
+				makeSlice := fmt.Sprintf("%s = make([]%s, length)", fieldName, typeName)
+				*lines = append(*lines, makeSlice)
+			}
+			if t.Kind() == reflect.Slice && elemT.Kind() == reflect.Uint8 {
+				line = fmt.Sprintf("%s = r.GetBytes(length)", fieldName)
+			} else {
+				iterVar := fmt.Sprintf("_%d", iterLevel)
+				initVar := fmt.Sprintf("%s, length_%d := 0, length", iterVar, iterLevel)
+				line = fmt.Sprintf("for %s; %s<length_%d; %s++ { //%s of %s",
+					initVar, iterVar, iterLevel, iterVar, t.Kind(), elemT.Kind())
+				*lines = append(*lines, line)
+				if elemT.Kind() == reflect.Interface || elemT.Kind() == reflect.Struct {
+					line = fmt.Sprintf("%s[%s] = Rand%s(r)", fieldName, iterVar, typeName)
+					*lines = append(*lines, line)
+				} else {
+					varName := fieldName + "[" + iterVar + "]"
+					nl := ctx.genFieldRandLines(elemT, lines, varName, iterLevel+1)
+					needLength = needLength || nl
+				}
+				line = "}"
+			}
 		}
 	case reflect.Interface:
 		typePath := t.PkgPath() + "." + t.Name()
@@ -1011,6 +1110,9 @@ func (ctx *context) genStructRandLines(t reflect.Type, lines *[]string, varName 
 //===================================================================
 
 func (ctx *context) genFieldDeepCopyLines(t reflect.Type, lines *[]string, fieldName string, iterLevel int) bool {
+	if isMutex(t) {
+		return false
+	}
 	needLength := false
 	isPtr := false
 	if t.Kind() == reflect.Ptr {
@@ -1045,22 +1147,22 @@ func (ctx *context) genFieldDeepCopyLines(t reflect.Type, lines *[]string, field
 		line = fmt.Sprintf("length = len(in%s)", fieldName)
 		needLength = true
 		*lines = append(*lines, line)
-		typeName := ctx.getTypeName(t.Elem())
+		typeName, isPtr := ctx.getTypeInfo(t.Elem())
 		elemT := t.Elem()
-		if t.Kind() == reflect.Slice {
-			makeSlice := fmt.Sprintf("out%s = make([]%s, length)", fieldName, typeName)
-			*lines = append(*lines, makeSlice)
-		}
-		if elemT.Kind() == reflect.Uint8 && t.Kind() == reflect.Slice {
-			line = fmt.Sprintf("copy(out%s[:], in%s[:])", fieldName, fieldName)
-		} else {
+		if isPtr {
+			if t.Kind() == reflect.Slice {
+				makeSlice := fmt.Sprintf("out%s = make([]*%s, length)", fieldName, typeName)
+				*lines = append(*lines, makeSlice)
+			}
 			iterVar := fmt.Sprintf("_%d", iterLevel)
 			initVar := fmt.Sprintf("%s, length_%d := 0, length", iterVar, iterLevel)
 			line = fmt.Sprintf("for %s; %s<length_%d; %s++ { //%s of %s",
-				initVar, iterVar, iterLevel, iterVar, t.Kind(), t.Elem().Kind())
+				initVar, iterVar, iterLevel, iterVar, t.Kind(), elemT.Kind())
 			*lines = append(*lines, line)
-			if t.Elem().Kind() == reflect.Interface || t.Elem().Kind() == reflect.Struct {
-				line = fmt.Sprintf("out%s[%s] = DeepCopy%s(in%s[%s])", fieldName, iterVar, typeName, fieldName, iterVar)
+			if elemT.Kind() == reflect.Interface || elemT.Kind() == reflect.Struct {
+				line = fmt.Sprintf("tmp = DeepCopy%s(in%s[%s])", typeName, fieldName, iterVar)
+				*lines = append(*lines, line)
+				line = fmt.Sprintf("out%s[%s] = &tmp", fieldName, iterVar)
 				*lines = append(*lines, line)
 			} else {
 				varName := fieldName + "[" + iterVar + "]"
@@ -1068,6 +1170,29 @@ func (ctx *context) genFieldDeepCopyLines(t reflect.Type, lines *[]string, field
 				needLength = needLength || nl
 			}
 			line = "}"
+		} else {
+			if t.Kind() == reflect.Slice {
+				makeSlice := fmt.Sprintf("out%s = make([]%s, length)", fieldName, typeName)
+				*lines = append(*lines, makeSlice)
+			}
+			if elemT.Kind() == reflect.Uint8 && t.Kind() == reflect.Slice {
+				line = fmt.Sprintf("copy(out%s[:], in%s[:])", fieldName, fieldName)
+			} else {
+				iterVar := fmt.Sprintf("_%d", iterLevel)
+				initVar := fmt.Sprintf("%s, length_%d := 0, length", iterVar, iterLevel)
+				line = fmt.Sprintf("for %s; %s<length_%d; %s++ { //%s of %s",
+					initVar, iterVar, iterLevel, iterVar, t.Kind(), t.Elem().Kind())
+				*lines = append(*lines, line)
+				if t.Elem().Kind() == reflect.Interface || t.Elem().Kind() == reflect.Struct {
+					line = fmt.Sprintf("out%s[%s] = DeepCopy%s(in%s[%s])", fieldName, iterVar, typeName, fieldName, iterVar)
+					*lines = append(*lines, line)
+				} else {
+					varName := fieldName + "[" + iterVar + "]"
+					nl := ctx.genFieldDeepCopyLines(elemT, lines, varName, iterLevel+1)
+					needLength = needLength || nl
+				}
+				line = "}"
+			}
 		}
 	case reflect.Interface:
 		typePath := t.PkgPath() + "." + t.Name()
