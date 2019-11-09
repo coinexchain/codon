@@ -210,14 +210,16 @@ func codonDecodeString(bz []byte, n *int, err *error) string {
 }
 `
 
-var ImportsForBridgeLogic = []string{`"io"`, `"fmt"`, `"reflect"`, `amino "github.com/tendermint/go-amino"`}
+var ImportsForBridgeLogic = []string{`"io"`, `"fmt"`, `"reflect"`, `amino "github.com/wide-key/wrap-amino"`}
 
 var BridgeLogic = `
 // ========= BridgeBegin ============
 type CodecImp struct {
 	sealed          bool
-	structPath2Name map[string]string
 }
+
+var _ amino.Sealer = &CodecImp{}
+var _ amino.CodecIfc = &CodecImp{}
 
 func (cdc *CodecImp) MarshalBinaryBare(o interface{}) ([]byte, error) {
 	s := CodonStub{}
@@ -350,20 +352,39 @@ func (cdc *CodecImp) RegisterConcrete(o interface{}, name string, copts *amino.C
 	}
 	t := derefPtr(o)
 	path := t.PkgPath() + "." + t.Name()
-	cdc.structPath2Name[path] = name
+	found := false
+	for _, entry := range GetSupportList() {
+		if path == entry {
+			found = true
+			break
+		}
+	}
+	if !found {
+		panic(fmt.Sprintf("%s is not supported", path))
+	}
 }
-func (cdc *CodecImp) RegisterInterface(_ interface{}, _ *amino.InterfaceOptions) {
+func (cdc *CodecImp) RegisterInterface(o interface{}, _ *amino.InterfaceOptions) {
 	if cdc.sealed {
 		panic("Codec is already sealed")
 	}
-	//Nop
+	t := derefPtr(o)
+	path := t.PkgPath() + "." + t.Name()
+	found := false
+	for _, entry := range GetSupportList() {
+		if path == entry {
+			found = true
+			break
+		}
+	}
+	if !found {
+		panic(fmt.Sprintf("%s is not supported", path))
+	}
 }
-func (cdc *CodecImp) SealImp() amino.CodecIfc {
+func (cdc *CodecImp) SealImp() {
 	if cdc.sealed {
 		panic("Codec is already sealed")
 	}
 	cdc.sealed = true
-	return cdc
 }
 
 // ========================================
@@ -372,9 +393,7 @@ type CodonStub struct {
 }
 
 func (_ *CodonStub) NewCodecImp() amino.CodecIfc {
-	return &CodecImp{
-		structPath2Name: make(map[string]string),
-	}
+	return &CodecImp{}
 }
 func (_ *CodonStub) DeepCopy(o interface{}) (r interface{}) {
 	r = DeepCopyAny(o)
@@ -399,31 +418,32 @@ func (s *CodonStub) MarshalBinaryLengthPrefixed(o interface{}) ([]byte, error) {
 	return append(buf[:n], bz...), err
 }
 func (_ *CodonStub) UnmarshalBinaryBare(bz []byte, ptr interface{}) error {
-	if _, err := getMagicBytesOfVar(ptr); err!=nil {
-		return err
-	}
 	rv := reflect.ValueOf(ptr)
 	if rv.Kind() != reflect.Ptr {
 		panic("Unmarshal expects a pointer")
 	}
+
 	if len(bz) <= 4 {
 		return fmt.Errorf("Byte slice is too short: %d", len(bz))
 	}
-	magicBytes, err := getMagicBytesOfVar(ptr)
-	if err!=nil {
-		return err
-	}
-	if bz[0]!=magicBytes[0] || bz[1]!=magicBytes[1] || bz[2]!=magicBytes[2] || bz[3]!=magicBytes[3] {
-		return fmt.Errorf("MagicBytes Missmatch %v vs %v", bz[0:4], magicBytes[:])
+	if rv.Elem().Kind() != reflect.Interface {
+		magicBytes, err := getMagicBytesOfVar(ptr)
+		if err!=nil {
+			return err
+		}
+		if bz[0]!=magicBytes[0] || bz[1]!=magicBytes[1] || bz[2]!=magicBytes[2] || bz[3]!=magicBytes[3] {
+			return fmt.Errorf("MagicBytes Missmatch %v vs %v", bz[0:4], magicBytes[:])
+		}
 	}
 	o, _, err := DecodeAny(bz)
-	rv.Elem().Set(reflect.ValueOf(o))
+	if rv.Elem().Kind() == reflect.Interface {
+		AssignIfcPtrFromStruct(ptr, o)
+	} else {
+		rv.Elem().Set(reflect.ValueOf(o))
+	}
 	return err
 }
 func (s *CodonStub) UnmarshalBinaryLengthPrefixed(bz []byte, ptr interface{}) error {
-	if _, err := getMagicBytesOfVar(ptr); err!=nil {
-		return err
-	}
 	if len(bz) == 0 {
 		return errors.New("UnmarshalBinaryLengthPrefixed cannot decode empty bytes")
 	}

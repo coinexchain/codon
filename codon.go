@@ -231,11 +231,14 @@ func GenerateCodecFile(
 	// Top-level decode function, which supports all the registered types. It uses magic bytes to decide type
 	lines = ctx.generateDecodeAnyFunc()
 	writeLines(w, lines)
+	// Assign structs to interfaces' pointers
+	lines = ctx.generateIfcAssignFunc()
+	writeLines(w, lines)
 	// Fill an interface object, randomly select the underlying struct type and randomly fill the fields
-	lines, aliases = generateIfcRandFunc("RandAny", "interface{}", aliases, nil)
+	lines, aliases = ctx.generateIfcRandFunc("RandAny", "interface{}", nil, aliases, nil)
 	writeLines(w, lines)
 	// DeepCopy an interface object
-	lines = generateIfcDeepCopyFunc("DeepCopyAny", "interface{}", aliases)
+	lines = ctx.generateIfcDeepCopyFunc("DeepCopyAny", "interface{}", nil, aliases)
 	writeLines(w, lines)
 	// Generate a GetSupportList function which returns the sorted full path list of all the supported types
 	lines = ctx.generateSupportListFunc()
@@ -246,6 +249,7 @@ type context struct {
 	structPath2Alias map[string]string
 	ifcPath2Alias    map[string]string
 	structPath2Type  map[string]reflect.Type
+	structAlias2Type map[string]reflect.Type
 	ifcPath2Type     map[string]reflect.Type
 
 	// map an interface to its implementations
@@ -263,6 +267,7 @@ func newContext(leafTypes, ignoreImpl map[string]string) *context {
 		structPath2Alias: make(map[string]string),
 		ifcPath2Alias:    make(map[string]string),
 		structPath2Type:  make(map[string]reflect.Type),
+		structAlias2Type: make(map[string]reflect.Type),
 		ifcPath2Type:     make(map[string]reflect.Type),
 
 		ifcPath2StructPaths:    make(map[string][]string),
@@ -276,6 +281,10 @@ func newContext(leafTypes, ignoreImpl map[string]string) *context {
 func generateIfcEncodeFunc(funcName string, aliases []string) []string {
 	lines := make([]string, 0, 1000)
 	lines = append(lines, "func "+funcName+"(w *[]byte, x interface{}) {")
+
+	if funcName != "EncodeAny" {
+		lines = append(lines, "codonEncodeBool(w, x != nil)\nif x == nil {return}\n")
+	}
 	lines = append(lines, "switch v := x.(type) {")
 	for _, alias := range aliases {
 		lines = append(lines, fmt.Sprintf("case %s:", alias))
@@ -287,25 +296,35 @@ func generateIfcEncodeFunc(funcName string, aliases []string) []string {
 		lines = append(lines, fmt.Sprintf("Encode%s(w, *v)", alias))
 	}
 	lines = append(lines, "default:")
-	lines = append(lines, "panic(\"Unknown Type.\")")
+	lines = append(lines, `panic(fmt.Sprintf("Unknown Type %v %v\n", x, reflect.TypeOf(x)))`)
 	lines = append(lines, "} // end of switch")
 	lines = append(lines, "} // end of func")
 	return lines
 }
 
-func generateIfcRandFunc(funcName, ifc string, aliases []string, ignoreImpl map[string]string) ([]string, []string) {
+func (ctx *context) generateIfcRandFunc(funcName, ifcAlias string, ifcType reflect.Type, aliases []string, ignoreImpl map[string]string) ([]string, []string) {
 	lines := make([]string, 0, 1000)
-	lines = append(lines, "func "+funcName+"(r RandSrc) "+ifc+" {")
+	lines = append(lines, "func "+funcName+"(r RandSrc) "+ifcAlias+" {")
 	newAliases := make([]string, 0, len(aliases))
 	for _, alias := range aliases {
-		if ignoreImpl == nil || ignoreImpl[alias] != ifc {
+		if ignoreImpl == nil || ignoreImpl[alias] != ifcAlias {
 			newAliases = append(newAliases, alias)
 		}
 	}
 	lines = append(lines, fmt.Sprintf("switch r.GetUint() %% %d {", len(newAliases)))
 	for i, alias := range newAliases {
 		lines = append(lines, fmt.Sprintf("case %d:", i))
-		lines = append(lines, fmt.Sprintf("return Rand%s(r)", alias))
+		structType, ok := ctx.structAlias2Type[alias]
+		if !ok {
+			panic("Can not find type for "+alias)
+		}
+		if ifcType == nil || structType.Implements(ifcType) {
+			lines = append(lines, fmt.Sprintf("return Rand%s(r)", alias))
+		} else if reflect.PtrTo(structType).Implements(ifcType) {
+			lines = append(lines, fmt.Sprintf("tmp := Rand%s(r)\nreturn &tmp", alias))
+		} else {
+			panic(alias + "does not implement " + ifcAlias)
+		}
 	}
 	lines = append(lines, "default:")
 	lines = append(lines, "panic(\"Unknown Type.\")")
@@ -314,39 +333,57 @@ func generateIfcRandFunc(funcName, ifc string, aliases []string, ignoreImpl map[
 	return lines, newAliases
 }
 
-func generateIfcDeepCopyFunc(funcName, ifc string, aliases []string) []string {
+func (ctx *context) generateIfcDeepCopyFunc(funcName, ifcAlias string, ifcType reflect.Type, aliases []string) []string {
 	lines := make([]string, 0, 1000)
-	lines = append(lines, fmt.Sprintf("func %s(x %s) %s {", funcName, ifc, ifc))
+	lines = append(lines, fmt.Sprintf("func %s(x %s) %s {", funcName, ifcAlias, ifcAlias))
 	lines = append(lines, "switch v := x.(type) {")
 	for _, alias := range aliases {
-		lines = append(lines, fmt.Sprintf("case *%s:", alias))
-		lines = append(lines, fmt.Sprintf("res := DeepCopy%s(*v)\nreturn &res", alias))
-		lines = append(lines, fmt.Sprintf("case %s:", alias))
-		lines = append(lines, fmt.Sprintf("res := DeepCopy%s(v)\nreturn res", alias))
+		structType, ok := ctx.structAlias2Type[alias]
+		if !ok {
+			panic("Can not find type for "+alias)
+		}
+		if ifcType == nil || structType.Implements(ifcType) {
+			lines = append(lines, fmt.Sprintf("case %s:", alias))
+			lines = append(lines, fmt.Sprintf("res := DeepCopy%s(v)\nreturn res", alias))
+		}
+		if ifcType == nil || reflect.PtrTo(structType).Implements(ifcType) {
+			lines = append(lines, fmt.Sprintf("case *%s:", alias))
+			lines = append(lines, fmt.Sprintf("res := DeepCopy%s(*v)\nreturn &res", alias))
+		}
 	}
 	lines = append(lines, "default:")
-	lines = append(lines, "panic(\"Unknown Type.\")")
+	lines = append(lines, `panic(fmt.Sprintf("Unknown Type %v %v\n", x, reflect.TypeOf(x)))`)
 	lines = append(lines, "} // end of switch")
 	lines = append(lines, "} // end of func")
 	return lines
 }
 
 func (ctx *context) generateDecodeAnyFunc() []string {
-	res, _ := generateIfcDecodeFunc("DecodeAny", "interface{}", ctx.structAlias2MagicBytes)
+	res, _ := ctx.generateIfcDecodeFunc("DecodeAny", "interface{}", nil, ctx.structAlias2MagicBytes)
 	return res
 }
 
-func generateIfcDecodeFunc(funcName, decType string, alias2bytes map[string]MagicBytes) ([]string, []string) {
+func (ctx *context) generateIfcDecodeFunc(funcName, decTypeName string, decType reflect.Type, alias2bytes map[string]MagicBytes) ([]string, []string) {
 	aliases := make([]string, 0, len(alias2bytes))
 	for alias := range alias2bytes {
 		aliases = append(aliases, alias)
 	}
 	sort.Strings(aliases)
 	lines := make([]string, 0, 1000)
-	lines = append(lines, "func "+funcName+"(bz []byte) ("+decType+", int, error) {")
-	lines = append(lines, "var v "+decType)
+	lines = append(lines, "func "+funcName+"(bz []byte) ("+decTypeName+", int, error) {")
+	lines = append(lines, "var v "+decTypeName)
 	lines = append(lines, "var magicBytes [4]byte")
 	lines = append(lines, "var n int")
+
+	extraByteCount := 4
+	if decTypeName != "interface{}" {
+		lines = append(lines, "var err error")
+		ending := "\nif err != nil {return v, n, err}\nbz = bz[n:]"
+		lines = append(lines, fmt.Sprintf("notNil := codonDecodeBool(bz, &n, &err)%s\nif !notNil {", ending))
+		lines = append(lines, fmt.Sprintf("return nil, n, nil\n}"))
+		extraByteCount++
+	}
+
 	lines = append(lines, "for i:=0; i<4; i++ {magicBytes[i] = bz[i]}")
 	lines = append(lines, "switch magicBytes {")
 	for _, alias := range aliases {
@@ -354,7 +391,16 @@ func generateIfcDecodeFunc(funcName, decType string, alias2bytes map[string]Magi
 		lines = append(lines, fmt.Sprintf("case [4]byte{%d,%d,%d,%d}:",
 			magicBytes[0], magicBytes[1], magicBytes[2], magicBytes[3]))
 		lines = append(lines, fmt.Sprintf("v, n, err := Decode%s(bz[4:])", alias))
-		lines = append(lines, fmt.Sprintf("return v, n+4, err"))
+		structType, ok := ctx.structAlias2Type[alias]
+		if !ok {
+			panic("Can not find type for "+alias)
+		}
+		if decType == nil || structType.Implements(decType) {
+			lines = append(lines, fmt.Sprintf("return v, n+%d, err", extraByteCount))
+		} else if reflect.PtrTo(structType).Implements(decType) {
+			lines = append(lines, fmt.Sprintf("return &v, n+%d, err", extraByteCount))
+		} else {
+		}
 	}
 	lines = append(lines, "default:")
 	lines = append(lines, "panic(\"Unknown type\")")
@@ -393,7 +439,7 @@ func (ctx *context) generateMagicBytesFunc() []string {
 			magicBytes[0], magicBytes[1], magicBytes[2], magicBytes[3]))
 	}
 	lines = append(lines, "default:")
-	lines = append(lines, "return [4]byte{0,0,0,0}, errors.New(\"Unknown Type\")")
+	lines = append(lines, `panic(fmt.Sprintf("Unknown Type %v %v\n", x, reflect.TypeOf(x)))`)
 	lines = append(lines, "} // end of switch")
 	lines = append(lines, "} // end of func")
 	return lines
@@ -423,7 +469,7 @@ func (ctx *context) generateSupportListFunc() []string {
 func (ctx *context) analyzeIfc() {
 	for ifcPath, ifcType := range ctx.ifcPath2Type {
 		for structPath, structType := range ctx.structPath2Type {
-			if structType.Implements(ifcType) {
+			if structType.Implements(ifcType) || reflect.PtrTo(structType).Implements(ifcType) {
 				if _, ok := ctx.ifcPath2StructPaths[ifcPath]; ok {
 					ctx.ifcPath2StructPaths[ifcPath] = append(ctx.ifcPath2StructPaths[ifcPath], structPath)
 				} else {
@@ -445,15 +491,16 @@ func derefPtr(v interface{}) reflect.Type {
 func (ctx *context) register(alias string, name string, v interface{}) {
 	t := derefPtr(v)
 	path := t.PkgPath() + "." + t.Name()
-	if len(t.PkgPath()) == 0 || len(t.Name()) == 0 {
-		panic("Invalid Path:" + path)
-	}
+	//if len(t.PkgPath()) == 0 || len(t.Name()) == 0 {
+	//	panic("Invalid Path:" + path)
+	//}
 	if t.Kind() == reflect.Interface {
 		ctx.ifcPath2Alias[path] = alias
 		ctx.ifcPath2Type[path] = t
 	} else {
 		ctx.structPath2Alias[path] = alias
 		ctx.structPath2Type[path] = t
+		ctx.structAlias2Type[alias] = t
 		magicBytes := calcMagicBytes([]string{alias, name})
 		if otherAlias, ok := ctx.magicBytes2StructAlias[magicBytes]; ok {
 			panic("Magic Bytes Conflicts: " + otherAlias + " vs " + alias)
@@ -461,6 +508,36 @@ func (ctx *context) register(alias string, name string, v interface{}) {
 		ctx.structAlias2MagicBytes[alias] = magicBytes
 		ctx.magicBytes2StructAlias[magicBytes] = alias
 	}
+}
+
+func (ctx *context) generateIfcAssignFunc() []string {
+	lines := make([]string, 0, 1000)
+	lines = append(lines, "func AssignIfcPtrFromStruct(ifcPtrIn interface{}, structObjIn interface{}) {")
+	lines = append(lines, "switch ifcPtr := ifcPtrIn.(type) {")
+	for ifcPath, structPaths := range ctx.ifcPath2StructPaths {
+		ifcAlias, ok := ctx.ifcPath2Alias[ifcPath]
+		if !ok {
+			panic("cannot find ifcAlias")
+		}
+		lines = append(lines, fmt.Sprintf("case *%s:", ifcAlias))
+		lines = append(lines, "switch structObj := structObjIn.(type) {")
+		for _, structPath := range structPaths {
+			structAlias, ok := ctx.structPath2Alias[structPath]
+			if !ok {
+				panic("cannot find structAlias")
+			}
+			lines = append(lines, fmt.Sprintf("\tcase %s:", structAlias))
+			lines = append(lines, "\t*ifcPtr = &structObj")
+		}
+		lines = append(lines, "\tdefault:")
+		lines = append(lines, `	panic(fmt.Sprintf("Type mismatch %v %v\n", reflect.TypeOf(ifcPtr), reflect.TypeOf(structObjIn)))`)
+		lines = append(lines, "\t} // end switch of structs")
+	}
+	lines = append(lines, "default:")
+	lines = append(lines, `panic(fmt.Sprintf("Unknown Type %v\n", reflect.TypeOf(ifcPtrIn)))`)
+	lines = append(lines, "} // end switch of interfaces")
+	lines = append(lines, "}")
+	return lines
 }
 
 func (ctx *context) generateIfcFunc(ifc string, t reflect.Type) []string {
@@ -481,10 +558,10 @@ func (ctx *context) generateIfcFunc(ifc string, t reflect.Type) []string {
 		}
 		alias2bytes[alias] = magicBytes
 	}
-	decLines, aliases := generateIfcDecodeFunc("Decode"+ifc, ifc, alias2bytes)
+	decLines, aliases := ctx.generateIfcDecodeFunc("Decode"+ifc, ifc, t, alias2bytes)
 	encLines := generateIfcEncodeFunc("Encode"+ifc, aliases)
-	randLines, aliases := generateIfcRandFunc("Rand"+ifc, ifc, aliases, ctx.ignoreImpl)
-	deepcopyLines := generateIfcDeepCopyFunc("DeepCopy"+ifc, ifc, aliases)
+	randLines, aliases := ctx.generateIfcRandFunc("Rand"+ifc, ifc, t, aliases, ctx.ignoreImpl)
+	deepcopyLines := ctx.generateIfcDeepCopyFunc("DeepCopy"+ifc, ifc, t, aliases)
 	result := make([]string, 0, len(decLines)+len(encLines)+len(randLines)+len(deepcopyLines))
 	result = append(result, decLines...)
 	result = append(result, encLines...)
@@ -499,7 +576,11 @@ func (ctx *context) generateStructFunc(alias string, t reflect.Type) []string {
 	// Encode
 	line := fmt.Sprintf("func Encode%s(w *[]byte, v %s) {", alias, alias)
 	lines = append(lines, line)
-	if t.Kind() == reflect.Struct {
+	_, isLeaf := ctx.leafTypes[t.PkgPath()+"."+t.Name()]
+	if !isLeaf && len(t.PkgPath())==0 {
+		isLeaf = true
+	}
+	if t.Kind() == reflect.Struct && !isLeaf{
 		ctx.genStructEncLines(t, &lines, "v", 0)
 	} else {
 		ctx.genFieldEncLines(t, &lines, "v", 0)
@@ -516,7 +597,7 @@ func (ctx *context) generateStructFunc(alias string, t reflect.Type) []string {
 	lines = append(lines, "var n int")
 	lines = append(lines, "var total int")
 	needLength := false
-	if t.Kind() == reflect.Struct {
+	if t.Kind() == reflect.Struct && !isLeaf {
 		nl := ctx.genStructDecLines(t, &lines, "v", 0)
 		needLength = needLength || nl
 	} else {
@@ -536,7 +617,7 @@ func (ctx *context) generateStructFunc(alias string, t reflect.Type) []string {
 	lines = append(lines, "") // length placeholder
 	lines = append(lines, "var v "+alias)
 	needLength = false
-	if t.Kind() == reflect.Struct {
+	if t.Kind() == reflect.Struct && !isLeaf {
 		nl := ctx.genStructRandLines(t, &lines, "v", 0)
 		needLength = needLength || nl
 	} else {
@@ -555,7 +636,7 @@ func (ctx *context) generateStructFunc(alias string, t reflect.Type) []string {
 	lengthLinePosition = len(lines)
 	lines = append(lines, "") // length placeholder
 	needLength = false
-	if t.Kind() == reflect.Struct {
+	if t.Kind() == reflect.Struct && !isLeaf {
 		nl := ctx.genStructDeepCopyLines(t, &lines, "", 0)
 		needLength = needLength || nl
 	} else {
@@ -692,7 +773,7 @@ func (ctx *context) genFieldEncLines(t reflect.Type, lines *[]string, fieldName 
 		if !ok {
 			panic("Cannot find alias for:" + typePath)
 		}
-		line = fmt.Sprintf("Encode%s(w, %s) // interface_encode", alias, fieldName)
+		line = fmt.Sprintf("Encode%s(w, %s)// interface_encode", alias, fieldName)
 	case reflect.Ptr:
 		panic("Should not reach here")
 	case reflect.Struct:
@@ -744,16 +825,6 @@ func (ctx *context) getTypeInfo(elemT reflect.Type) (string, bool) {
 		elemT = elemT.Elem()
 		isPtr = true
 	}
-	if elemT.Kind() == reflect.Array {
-		panic("Do not support slice/array of arrays")
-	}
-	if elemT.Kind() == reflect.Slice {
-		if elemT.Elem().Kind() == reflect.Uint8 {
-			return "[]byte", false
-		} else {
-			panic("Do not support slice/array of slices, except for byte slices")
-		}
-	}
 	if len(elemT.PkgPath()) == 0 {
 		return elemT.Name(), isPtr //basic type
 	}
@@ -764,6 +835,18 @@ func (ctx *context) getTypeInfo(elemT reflect.Type) (string, bool) {
 	}
 	if !ok {
 		panic(typePath + " is not registered")
+	}
+	if !ok {
+		if elemT.Kind() == reflect.Array {
+			panic("Do not support slice/array of arrays")
+		}
+		if elemT.Kind() == reflect.Slice {
+			if elemT.Elem().Kind() == reflect.Uint8 {
+				return "[]byte", false
+			} else {
+				panic("Do not support slice/array of slices, except for byte slices")
+			}
+		}
 	}
 	return alias, isPtr
 }
