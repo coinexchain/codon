@@ -194,7 +194,9 @@ func codonGetByteSlice(bz []byte, length int) ([]byte, int, error) {
 	if len(bz) < length {
 		return nil, 0, errors.New("Not enough bytes to read")
 	}
-	return bz[:length], length, nil
+	res := make([]byte, length)
+	copy(res, bz[:length])
+	return res, length, nil
 }
 func codonDecodeString(bz []byte, n *int, err *error) string {
 	var m int
@@ -210,7 +212,7 @@ func codonDecodeString(bz []byte, n *int, err *error) string {
 }
 `
 
-var ImportsForBridgeLogic = []string{`"io"`, `"fmt"`, `"reflect"`, `amino "github.com/wide-key/wrap-amino"`}
+var ImportsForBridgeLogic = []string{`"io"`, `"fmt"`, `"reflect"`, `amino "github.com/coinexchain/codon/wrap-amino"`}
 
 var BridgeLogic = `
 // ========= BridgeBegin ============

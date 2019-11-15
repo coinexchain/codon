@@ -498,7 +498,11 @@ func (ctx *context) register(alias string, name string, v interface{}) {
 		ctx.ifcPath2Alias[path] = alias
 		ctx.ifcPath2Type[path] = t
 	} else {
-		ctx.structPath2Alias[path] = alias
+		if path == "." { // a special case for [][]byte
+			ctx.structPath2Alias[alias] = alias
+		} else {
+			ctx.structPath2Alias[path] = alias
+		}
 		ctx.structPath2Type[path] = t
 		ctx.structAlias2Type[alias] = t
 		magicBytes := calcMagicBytes([]string{alias, name})
