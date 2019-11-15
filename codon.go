@@ -941,7 +941,8 @@ func (ctx *context) genFieldDecLines(t reflect.Type, lines *[]string, fieldName 
 		elemT := t.Elem()
 		if isPtr {
 			if t.Kind() == reflect.Slice {
-				makeSlice := fmt.Sprintf("%s = make([]*%s, length)", fieldName, typeName)
+				makeSlice := fmt.Sprintf("if length==0 {%s = nil\n} else {\n%s = make([]*%s, length)\n}",
+					fieldName, fieldName, typeName)
 				*lines = append(*lines, makeSlice)
 			}
 			iterVar := fmt.Sprintf("_%d", iterLevel)
@@ -962,7 +963,8 @@ func (ctx *context) genFieldDecLines(t reflect.Type, lines *[]string, fieldName 
 			line = "}"
 		} else {
 			if t.Kind() == reflect.Slice && elemT.Kind() != reflect.Uint8 {
-				makeSlice := fmt.Sprintf("%s = make([]%s, length)", fieldName, typeName)
+				makeSlice := fmt.Sprintf("if length==0 {%s = nil\n} else {\n%s = make([]%s, length)\n}",
+					fieldName, fieldName, typeName)
 				*lines = append(*lines, makeSlice)
 			}
 			if t.Kind() == reflect.Slice && elemT.Kind() == reflect.Uint8 {
@@ -1109,7 +1111,8 @@ func (ctx *context) genFieldRandLines(t reflect.Type, lines *[]string, fieldName
 		elemT := t.Elem()
 		if isPtr {
 			if t.Kind() == reflect.Slice {
-				makeSlice := fmt.Sprintf("%s = make([]*%s, length)", fieldName, typeName)
+				makeSlice := fmt.Sprintf("if length==0 {%s = nil\n} else {\n%s = make([]*%s, length)\n}",
+					fieldName, fieldName, typeName)
 				*lines = append(*lines, makeSlice)
 			}
 			iterVar := fmt.Sprintf("_%d", iterLevel)
@@ -1130,7 +1133,8 @@ func (ctx *context) genFieldRandLines(t reflect.Type, lines *[]string, fieldName
 			line = "}"
 		} else {
 			if t.Kind() == reflect.Slice && elemT.Kind() != reflect.Uint8 {
-				makeSlice := fmt.Sprintf("%s = make([]%s, length)", fieldName, typeName)
+				makeSlice := fmt.Sprintf("if length==0 {%s = nil\n} else {\n%s = make([]%s, length)\n}",
+					fieldName, fieldName, typeName)
 				*lines = append(*lines, makeSlice)
 			}
 			if t.Kind() == reflect.Slice && elemT.Kind() == reflect.Uint8 {
@@ -1238,7 +1242,8 @@ func (ctx *context) genFieldDeepCopyLines(t reflect.Type, lines *[]string, field
 		elemT := t.Elem()
 		if isPtr {
 			if t.Kind() == reflect.Slice {
-				makeSlice := fmt.Sprintf("out%s = make([]*%s, length)", fieldName, typeName)
+				makeSlice := fmt.Sprintf("if length==0 {out%s = nil\n} else {\nout%s = make([]*%s, length)\n}",
+					fieldName, fieldName, typeName)
 				*lines = append(*lines, makeSlice)
 			}
 			iterVar := fmt.Sprintf("_%d", iterLevel)
@@ -1259,7 +1264,8 @@ func (ctx *context) genFieldDeepCopyLines(t reflect.Type, lines *[]string, field
 			line = "}"
 		} else {
 			if t.Kind() == reflect.Slice {
-				makeSlice := fmt.Sprintf("out%s = make([]%s, length)", fieldName, typeName)
+				makeSlice := fmt.Sprintf("if length==0 {out%s = nil\n} else {\nout%s = make([]%s, length)\n}",
+					fieldName, fieldName, typeName)
 				*lines = append(*lines, makeSlice)
 			}
 			if elemT.Kind() == reflect.Uint8 && t.Kind() == reflect.Slice {

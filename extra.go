@@ -191,6 +191,9 @@ func codonDecodeFloat32(bz []byte, n *int, err *error) float32 {
 	return math.Float32frombits(i)
 }
 func codonGetByteSlice(bz []byte, length int) ([]byte, int, error) {
+	if length == 0 {
+		return nil, 0, nil
+	}
 	if len(bz) < length {
 		return nil, 0, errors.New("Not enough bytes to read")
 	}
