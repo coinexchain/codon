@@ -866,6 +866,20 @@ func (ctx *context) initPtrMember(fieldName string, t reflect.Type) string {
 }
 
 func (ctx *context) genFieldDecLines(fieldNum int, t reflect.Type, lines *[]string, fieldName string, iterLevel int) {
+	beforeDecodeFunc := `l := codonDecodeUint64(bz, &n, &err)
+	if err != nil {
+		return
+	}
+	bz = bz[n:]
+	total += n
+	if int(l) > len(bz) {
+		err = errors.New("Length Too Large")
+		return
+	}`
+	afterDecodeFunc := `if int(l) != n {
+		err = errors.New("Length Mismatch")
+		return
+	}`
 	if isMutex(t) {
 		return
 	}
@@ -933,9 +947,11 @@ func (ctx *context) genFieldDecLines(fieldNum int, t reflect.Type, lines *[]stri
 		elemT := t.Elem()
 		if isPtr {
 			if elemT.Kind() == reflect.Interface || elemT.Kind() == reflect.Struct {
-				line = fmt.Sprintf("var tmp %s\ntmp, n, err = Decode%s(bz)%s",
+				*lines = append(*lines, beforeDecodeFunc)
+				line = fmt.Sprintf("var tmp %s\ntmp, n, err = Decode%s(bz[:l])%s",
 					typeName, typeName, ending)
 				*lines = append(*lines, line)
+				*lines = append(*lines, afterDecodeFunc)
 			} else {
 				ctx.genFieldDecLines(fieldNum, elemT, lines, "tmp", iterLevel+1)
 			}
@@ -947,9 +963,11 @@ func (ctx *context) genFieldDecLines(fieldNum int, t reflect.Type, lines *[]stri
 				line = fmt.Sprintf("%s = tmpBz", fieldName)
 			} else {
 				if elemT.Kind() == reflect.Interface || elemT.Kind() == reflect.Struct {
-					line = fmt.Sprintf("var tmp %s\ntmp, n, err = Decode%s(bz)%s",
+					*lines = append(*lines, beforeDecodeFunc)
+					line = fmt.Sprintf("var tmp %s\ntmp, n, err = Decode%s(bz[:l])%s",
 						typeName, typeName, ending)
 					*lines = append(*lines, line)
+					*lines = append(*lines, afterDecodeFunc)
 				} else {
 					*lines = append(*lines, fmt.Sprintf("var tmp %s", typeName))
 					ctx.genFieldDecLines(fieldNum, elemT, lines, "tmp", iterLevel+1)
@@ -963,17 +981,24 @@ func (ctx *context) genFieldDecLines(fieldNum int, t reflect.Type, lines *[]stri
 		if !ok {
 			panic("Cannot find alias for:" + typePath)
 		}
-		line = fmt.Sprintf("%s, n, err = Decode%s(bz)%s // interface_decode", fieldName, alias, ending)
+		*lines = append(*lines, beforeDecodeFunc)
+		line = fmt.Sprintf("%s, n, err = Decode%s(bz[:l])%s // interface_decode", fieldName, alias, ending)
+		*lines = append(*lines, line)
+		line = afterDecodeFunc
 	case reflect.Ptr:
 		panic("Should not reach here")
 	case reflect.Struct:
 		if _, ok := ctx.leafTypes[t.PkgPath()+"."+t.Name()]; ok {
+			*lines = append(*lines, beforeDecodeFunc)
 			if isPtr {
 				*lines = append(*lines, ctx.initPtrMember(fieldName, t))
-				line = fmt.Sprintf("*(%s), n, err = Decode%s(bz)%s", fieldName, t.Name(), ending)
+				line = fmt.Sprintf("*(%s), n, err = Decode%s(bz[:l])%s", fieldName, t.Name(), ending)
+				*lines = append(*lines, line)
 			} else {
-				line = fmt.Sprintf("%s, n, err = Decode%s(bz)%s", fieldName, t.Name(), ending)
+				line = fmt.Sprintf("%s, n, err = Decode%s(bz[:l])%s", fieldName, t.Name(), ending)
+				*lines = append(*lines, line)
 			}
+			line = afterDecodeFunc
 		} else {
 			if isPtr {
 				*lines = append(*lines, ctx.initPtrMember(fieldName, t))

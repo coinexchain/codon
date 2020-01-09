@@ -65,56 +65,26 @@ func codonEncodeUint16(n int, w *[]byte, v uint16) {
 
 func codonEncodeByteSlice(n int, w *[]byte, v []byte) {
 	codonWriteUvarint(w, (uint64(n)<<3)|2)
-	codonWriteVarint(w, int64(len(v)))
+	codonWriteUvarint(w, uint64(len(v)))
 	*w = append(*w, v...)
 }
 func codonEncodeString(n int, w *[]byte, v string) {
 	codonEncodeByteSlice(n, w, []byte(v))
 }
 func codonDecodeBool(bz []byte, n *int, err *error) bool {
-	if len(bz) < 1 {
-		*err = errors.New("Not enough bytes to read")
-		return false
-	}
-	*n = 1
-	*err = nil
-	return bz[0]!=0
+	return codonDecodeInt64(bz, n, err) != 0
 }
-func codonDecodeInt(bz []byte, m *int, err *error) int {
-	i, n := binary.Varint(bz)
-	if n == 0 {
-		// buf too small
-		*err = errors.New("buffer too small")
-	} else if n < 0 {
-		// value larger than 64 bits (overflow)
-		// and -n is the number of bytes read
-		n = -n
-		*err = errors.New("EOF decoding varint")
-	}
-	*m = n
-	return int(i)
+func codonDecodeInt(bz []byte, n *int, err *error) int {
+	return int(codonDecodeInt64(bz, n, err))
 }
 func codonDecodeInt8(bz []byte, n *int, err *error) int8 {
-	if len(bz) < 1 {
-		*err = errors.New("Not enough bytes to read")
-		return 0
-	}
-	*err = nil
-	*n = 1
-	return int8(bz[0])
+	return int8(codonDecodeInt64(bz, n, err))
 }
 func codonDecodeInt16(bz []byte, n *int, err *error) int16 {
-	if len(bz) < 2 {
-		*err = errors.New("Not enough bytes to read")
-		return 0
-	}
-	*n = 2
-	*err = nil
-	return int16(binary.LittleEndian.Uint16(bz[:2]))
+	return int16(codonDecodeInt64(bz, n, err))
 }
 func codonDecodeInt32(bz []byte, n *int, err *error) int32 {
-	i := codonDecodeInt64(bz, n, err)
-	return int32(i)
+	return int32(codonDecodeInt64(bz, n, err))
 }
 func codonDecodeInt64(bz []byte, m *int, err *error) int64 {
 	i, n := binary.Varint(bz)
@@ -132,30 +102,16 @@ func codonDecodeInt64(bz []byte, m *int, err *error) int64 {
 	return int64(i)
 }
 func codonDecodeUint(bz []byte, n *int, err *error) uint {
-	i := codonDecodeUint64(bz, n, err)
-	return uint(i)
+	return uint(codonDecodeUint64(bz, n, err))
 }
 func codonDecodeUint8(bz []byte, n *int, err *error) uint8 {
-	if len(bz) < 1 {
-		*err = errors.New("Not enough bytes to read")
-		return 0
-	}
-	*n = 1
-	*err = nil
-	return uint8(bz[0])
+	return uint8(codonDecodeUint64(bz, n, err))
 }
 func codonDecodeUint16(bz []byte, n *int, err *error) uint16 {
-	if len(bz) < 2 {
-		*err = errors.New("Not enough bytes to read")
-		return 0
-	}
-	*n = 2
-	*err = nil
-	return uint16(binary.LittleEndian.Uint16(bz[:2]))
+	return uint16(codonDecodeUint64(bz, n, err))
 }
 func codonDecodeUint32(bz []byte, n *int, err *error) uint32 {
-	i := codonDecodeUint64(bz, n, err)
-	return uint32(i)
+	return uint32(codonDecodeUint64(bz, n, err))
 }
 func codonDecodeUint64(bz []byte, m *int, err *error) uint64 {
 	i, n := binary.Uvarint(bz)
@@ -200,9 +156,9 @@ func codonGetByteSlice(res *[]byte, bz []byte) (int, error) {
 	return n+int(length), nil
 }
 func codonDecodeString(bz []byte, n *int, err *error) string {
-	var res *[]byte
-	*n, *err = codonGetByteSlice(res, bz)
-	return string(*res)
+	var res []byte
+	*n, *err = codonGetByteSlice(&res, bz)
+	return string(res)
 }
 
 `
