@@ -57,8 +57,6 @@ type StubIfc interface {
 	EncodeUint32(w io.Writer, u uint32) (err error)
 	EncodeUint64(w io.Writer, u uint64) (err error)
 	EncodeBool(w io.Writer, b bool) (err error)
-	EncodeFloat32(w io.Writer, f float32) (err error)
-	EncodeFloat64(w io.Writer, f float64) (err error)
 	EncodeString(w io.Writer, s string) (err error)
 	DecodeInt8(bz []byte) (i int8, n int, err error)
 	DecodeInt16(bz []byte) (i int16, n int, err error)
@@ -72,8 +70,6 @@ type StubIfc interface {
 	DecodeUint64(bz []byte) (u uint64, n int, err error)
 	DecodeUvarint(bz []byte) (u uint64, n int, err error)
 	DecodeBool(bz []byte) (b bool, n int, err error)
-	DecodeFloat32(bz []byte) (f float32, n int, err error)
-	DecodeFloat64(bz []byte) (f float64, n int, err error)
 	DecodeByteSlice(bz []byte) (bz2 []byte, n int, err error)
 	DecodeString(bz []byte) (s string, n int, err error)
 	VarintSize(i int64) int
@@ -259,14 +255,6 @@ func EncodeBool(w io.Writer, b bool) (err error) {
 	err = Stub.EncodeBool(w, b)
 	return
 }
-func EncodeFloat32(w io.Writer, f float32) (err error) {
-	err = Stub.EncodeFloat32(w, f)
-	return
-}
-func EncodeFloat64(w io.Writer, f float64) (err error) {
-	err = Stub.EncodeFloat64(w, f)
-	return
-}
 func EncodeString(w io.Writer, s string) (err error) {
 	err = Stub.EncodeString(w, s)
 	return
@@ -317,14 +305,6 @@ func DecodeUvarint(bz []byte) (u uint64, n int, err error) {
 }
 func DecodeBool(bz []byte) (b bool, n int, err error) {
 	b, n, err = Stub.DecodeBool(bz)
-	return
-}
-func DecodeFloat32(bz []byte) (f float32, n int, err error) {
-	f, n, err = Stub.DecodeFloat32(bz)
-	return
-}
-func DecodeFloat64(bz []byte) (f float64, n int, err error) {
-	f, n, err = Stub.DecodeFloat64(bz)
 	return
 }
 func DecodeByteSlice(bz []byte) (bz2 []byte, n int, err error) {

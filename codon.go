@@ -186,7 +186,7 @@ func GenerateCodecFile(
 	for _, p := range extraImports {
 		w.Write([]byte(p + "\n"))
 	}
-	w.Write([]byte("\"encoding/binary\"\n\"math\"\n\"errors\"\n)\n"))
+	w.Write([]byte("\"encoding/binary\"\n\"errors\"\n)\n"))
 	w.Write([]byte(headerLogics))
 	w.Write([]byte(extraLogics))
 
@@ -282,9 +282,6 @@ func generateIfcEncodeFunc(funcName string, aliases []string) []string {
 	lines := make([]string, 0, 1000)
 	lines = append(lines, "func "+funcName+"(w *[]byte, x interface{}) {")
 
-	if funcName != "EncodeAny" {
-		lines = append(lines, "codonEncodeBool(w, x != nil)\nif x == nil {return}\n")
-	}
 	lines = append(lines, "switch v := x.(type) {")
 	for _, alias := range aliases {
 		lines = append(lines, fmt.Sprintf("case %s:", alias))
@@ -376,13 +373,6 @@ func (ctx *context) generateIfcDecodeFunc(funcName, decTypeName string, decType 
 	lines = append(lines, "var n int")
 
 	extraByteCount := 4
-	if decTypeName != "interface{}" {
-		lines = append(lines, "var err error")
-		ending := "\nif err != nil {return v, n, err}\nbz = bz[n:]"
-		lines = append(lines, fmt.Sprintf("notNil := codonDecodeBool(bz, &n, &err)%s\nif !notNil {", ending))
-		lines = append(lines, fmt.Sprintf("return nil, n, nil\n}"))
-		extraByteCount++
-	}
 
 	lines = append(lines, "for i:=0; i<4; i++ {magicBytes[i] = bz[i]}")
 	lines = append(lines, "switch magicBytes {")
@@ -587,40 +577,37 @@ func (ctx *context) generateStructFunc(alias string, t reflect.Type) []string {
 	if t.Kind() == reflect.Struct && !isLeaf{
 		ctx.genStructEncLines(t, &lines, "v", 0)
 	} else {
-		ctx.genFieldEncLines(t, &lines, "v", 0)
+		ctx.genFieldEncLines(0, t, &lines, "v", 0)
 	}
 	lines = append(lines, "} //End of Encode"+alias+"\n")
 
 	// Decode
-	line = fmt.Sprintf("func Decode%s(bz []byte) (%s, int, error) {", alias, alias)
+	line = fmt.Sprintf("func Decode%s(bz []byte) (v %s, total int, err error) {", alias, alias)
 	lines = append(lines, line)
-	lines = append(lines, "var err error")
-	lengthLinePosition := len(lines)
-	lines = append(lines, "") // length placeholder
-	lines = append(lines, "var v "+alias)
 	lines = append(lines, "var n int")
-	lines = append(lines, "var total int")
-	needLength := false
+	ending := "\nif err != nil {return v, total, err}\nbz = bz[n:]\ntotal+=n"
+	lines = append(lines, "for len(bz) != 0 {")
+	lines = append(lines, fmt.Sprintf("tag := codonDecodeUint64(bz, &n, &err)%s", ending))
+	lines = append(lines, "tag = tag >> 3")
+	lines = append(lines, "switch tag {")
 	if t.Kind() == reflect.Struct && !isLeaf {
-		nl := ctx.genStructDecLines(t, &lines, "v", 0)
-		needLength = needLength || nl
+		ctx.genStructDecLines(t, &lines, "v", 0)
 	} else {
-		nl := ctx.genFieldDecLines(t, &lines, "v", 0)
-		needLength = needLength || nl
+		lines = append(lines, "case 0:")
+		ctx.genFieldDecLines(0, t, &lines, "v", 0)
 	}
-	if needLength {
-		lines[lengthLinePosition] = "var length int"
-	}
+	lines = append(lines, "default: err = errors.New(\"Unknown Field\")\nreturn\n}")
+	lines = append(lines, "} // end for")
 	lines = append(lines, "return v, total, nil")
 	lines = append(lines, "} //End of Decode"+alias+"\n")
 
 	// Rand
 	line = fmt.Sprintf("func Rand%s(r RandSrc) %s {", alias, alias)
 	lines = append(lines, line)
-	lengthLinePosition = len(lines)
+	lengthLinePosition := len(lines)
 	lines = append(lines, "") // length placeholder
 	lines = append(lines, "var v "+alias)
-	needLength = false
+	needLength := false
 	if t.Kind() == reflect.Struct && !isLeaf {
 		nl := ctx.genStructRandLines(t, &lines, "v", 0)
 		needLength = needLength || nl
@@ -667,7 +654,7 @@ func isMutex(t reflect.Type) bool {
 	return false
 }
 
-func (ctx *context) genFieldEncLines(t reflect.Type, lines *[]string, fieldName string, iterLevel int) {
+func (ctx *context) genFieldEncLines(fieldNum int, t reflect.Type, lines *[]string, fieldName string, iterLevel int) {
 	if isMutex(t) {
 		return
 	}
@@ -695,80 +682,76 @@ func (ctx *context) genFieldEncLines(t reflect.Type, lines *[]string, fieldName 
 		panic("Complex128 is not supported")
 	case reflect.Map:
 		panic("Map is not supported")
+	case reflect.Float32:
+		panic("Float32 is not supported")
+	case reflect.Float64:
+		panic("Float64 is not supported")
 
 	case reflect.Bool:
 		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("codonEncodeBool(w, %s)", fieldName)
+			line = fmt.Sprintf("codonEncodeBool(%d, w, %s)", fieldNum, fieldName)
 		} else {
-			line = fmt.Sprintf("codonEncodeBool(w, bool(%s))", fieldName)
+			line = fmt.Sprintf("codonEncodeBool(%d, w, bool(%s))", fieldNum, fieldName)
 		}
 	case reflect.Int:
-		line = fmt.Sprintf("codonEncodeVarint(w, int64(%s))", fieldName)
+		line = fmt.Sprintf("codonEncodeVarint(%d, w, int64(%s))", fieldNum, fieldName)
 	case reflect.Int8:
 		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("codonEncodeInt8(w, %s)", fieldName)
+			line = fmt.Sprintf("codonEncodeInt8(%d, w, %s)", fieldNum, fieldName)
 		} else {
-			line = fmt.Sprintf("codonEncodeInt8(w, int8(%s))", fieldName)
+			line = fmt.Sprintf("codonEncodeInt8(%d, w, int8(%s))", fieldNum, fieldName)
 		}
 	case reflect.Int16:
 		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("codonEncodeInt16(w, %s)", fieldName)
+			line = fmt.Sprintf("codonEncodeInt16(%d, w, %s)", fieldNum, fieldName)
 		} else {
-			line = fmt.Sprintf("codonEncodeInt16(w, int16(%s))", fieldName)
+			line = fmt.Sprintf("codonEncodeInt16(%d, w, int16(%s))", fieldNum, fieldName)
 		}
 	case reflect.Int32:
-		line = fmt.Sprintf("codonEncodeVarint(w, int64(%s))", fieldName)
+		line = fmt.Sprintf("codonEncodeVarint(%d, w, int64(%s))", fieldNum, fieldName)
 	case reflect.Int64:
-		line = fmt.Sprintf("codonEncodeVarint(w, int64(%s))", fieldName)
+		line = fmt.Sprintf("codonEncodeVarint(%d, w, int64(%s))", fieldNum, fieldName)
 	case reflect.Uint:
-		line = fmt.Sprintf("codonEncodeUvarint(w, uint64(%s))", fieldName)
+		line = fmt.Sprintf("codonEncodeUvarint(%d, w, uint64(%s))", fieldNum, fieldName)
 	case reflect.Uint8:
 		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("codonEncodeUint8(w, %s)", fieldName)
+			line = fmt.Sprintf("codonEncodeUint8(%d, w, %s)", fieldNum, fieldName)
 		} else {
-			line = fmt.Sprintf("codonEncodeUint8(w, uint8(%s))", fieldName)
+			line = fmt.Sprintf("codonEncodeUint8(%d, w, uint8(%s))", fieldNum, fieldName)
 		}
 	case reflect.Uint16:
 		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("codonEncodeUint16(w, %s)", fieldName)
+			line = fmt.Sprintf("codonEncodeUint16(%d, w, %s)", fieldNum, fieldName)
 		} else {
-			line = fmt.Sprintf("codonEncodeUint16(w, uint16(%s))", fieldName)
+			line = fmt.Sprintf("codonEncodeUint16(%d, w, uint16(%s))", fieldNum, fieldName)
 		}
 	case reflect.Uint32:
-		line = fmt.Sprintf("codonEncodeUvarint(w, uint64(%s))", fieldName)
+		line = fmt.Sprintf("codonEncodeUvarint(%d, w, uint64(%s))", fieldNum, fieldName)
 	case reflect.Uint64:
-		line = fmt.Sprintf("codonEncodeUvarint(w, uint64(%s))", fieldName)
-	case reflect.Float32:
-		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("codonEncodeFloat32(w, %s)", fieldName)
-		} else {
-			line = fmt.Sprintf("codonEncodeFloat32(w, float32(%s))", fieldName)
-		}
-	case reflect.Float64:
-		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("codonEncodeFloat64(w, %s)", fieldName)
-		} else {
-			line = fmt.Sprintf("codonEncodeFloat64(w, float64(%s))", fieldName)
-		}
+		line = fmt.Sprintf("codonEncodeUvarint(%d, w, uint64(%s))", fieldNum, fieldName)
 	case reflect.String:
 		if len(t.PkgPath()) == 0 {
-			line = fmt.Sprintf("codonEncodeString(w, %s)", fieldName)
+			line = fmt.Sprintf("codonEncodeString(%d, w, %s)", fieldNum, fieldName)
 		} else {
-			line = fmt.Sprintf("codonEncodeString(w, string(%s))", fieldName)
+			line = fmt.Sprintf("codonEncodeString(%d, w, string(%s))", fieldNum, fieldName)
 		}
-	case reflect.Array, reflect.Slice:
+	case reflect.Array:
+		if t.Elem().Kind() != reflect.Uint8 {
+			panic("ByteArray is the only supported array type")
+		}
+		line = fmt.Sprintf("codonEncodeByteSlice(%d, w, %s[:])", fieldNum, fieldName)
+	case reflect.Slice:
 		elemT := t.Elem()
 		if elemT.Kind() == reflect.Uint8 {
-			line = fmt.Sprintf("codonEncodeByteSlice(w, %s[:])", fieldName)
+			line = fmt.Sprintf("codonEncodeByteSlice(%d, w, %s[:])", fieldNum, fieldName)
 		} else {
-			line = fmt.Sprintf("codonEncodeVarint(w, int64(len(%s)))", fieldName)
 			*lines = append(*lines, line)
 			iterVar := fmt.Sprintf("_%d", iterLevel)
 			line = fmt.Sprintf("for %s:=0; %s<len(%s); %s++ {",
 				iterVar, iterVar, fieldName, iterVar)
 			*lines = append(*lines, line)
 			varName := fieldName + "[" + iterVar + "]"
-			ctx.genFieldEncLines(elemT, lines, varName, iterLevel+1)
+			ctx.genFieldEncLines(fieldNum, elemT, lines, varName, iterLevel+1)
 			line = "}"
 		}
 	case reflect.Interface:
@@ -777,7 +760,11 @@ func (ctx *context) genFieldEncLines(t reflect.Type, lines *[]string, fieldName 
 		if !ok {
 			panic("Cannot find alias for:" + typePath)
 		}
-		line = fmt.Sprintf("Encode%s(w, %s)// interface_encode", alias, fieldName)
+		line = fmt.Sprintf("codonEncodeByteSlice(%d, w, func() []byte {", fieldNum)
+		*lines = append(*lines, line)
+		*lines = append(*lines, "w := make([]byte, 0, 64)")
+		*lines = append(*lines, fmt.Sprintf("Encode%s(&w, %s)// interface_encode", alias, fieldName))
+		line = "return w\n}()) // end of " + fieldName
 	case reflect.Ptr:
 		panic("Should not reach here")
 	case reflect.Struct:
@@ -785,10 +772,13 @@ func (ctx *context) genFieldEncLines(t reflect.Type, lines *[]string, fieldName 
 			if isPtr {
 				fieldName = "*(" + fieldName + ")"
 			}
-			line = fmt.Sprintf("Encode%s(w, %s)", t.Name(), fieldName)
+			line = fmt.Sprintf("codonEncodeByteSlice(%d, w, Encode%s(%s))", fieldNum, t.Name(), fieldName)
 		} else {
+			line = fmt.Sprintf("codonEncodeByteSlice(%d, w, func() []byte {",fieldNum)
+			*lines = append(*lines, line)
+			*lines = append(*lines, "wBuf := make([]byte, 0, 64)\nw := &wBuf")
 			ctx.genStructEncLines(t, lines, fieldName, iterLevel)
-			line = "// end of " + fieldName
+			line = "return wBuf\n}()) // end of " + fieldName
 		}
 	default:
 		panic(fmt.Sprintf("Unknown Kind %s", t.Kind()))
@@ -799,7 +789,7 @@ func (ctx *context) genFieldEncLines(t reflect.Type, lines *[]string, fieldName 
 func (ctx *context) genStructEncLines(t reflect.Type, lines *[]string, varName string, iterLevel int) {
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
-		ctx.genFieldEncLines(field.Type, lines, varName+"."+field.Name, iterLevel)
+		ctx.genFieldEncLines(i, field.Type, lines, varName+"."+field.Name, iterLevel)
 	}
 }
 
@@ -875,12 +865,11 @@ func (ctx *context) initPtrMember(fieldName string, t reflect.Type) string {
 	return fmt.Sprintf("%s = &%s{}", fieldName, alias)
 }
 
-func (ctx *context) genFieldDecLines(t reflect.Type, lines *[]string, fieldName string, iterLevel int) bool {
+func (ctx *context) genFieldDecLines(fieldNum int, t reflect.Type, lines *[]string, fieldName string, iterLevel int) {
 	if isMutex(t) {
-		return false
+		return
 	}
-	ending := "\nif err != nil {return v, total, err}\nbz = bz[n:]\ntotal+=n"
-	needLength := false
+	ending := "\nif err != nil {return}\nbz = bz[n:]\ntotal+=n"
 	isPtr := false
 	if t.Kind() == reflect.Ptr {
 		isPtr = true
@@ -905,6 +894,10 @@ func (ctx *context) genFieldDecLines(t reflect.Type, lines *[]string, fieldName 
 		panic("Complex128 is not supported")
 	case reflect.Map:
 		panic("Map is not supported")
+	case reflect.Float32:
+		panic("Float32 is not supported")
+	case reflect.Float64:
+		panic("Float64 is not supported")
 	case reflect.Bool:
 		line = ctx.buildDecLine("Bool", fieldName, ending, t)
 	case reflect.Int:
@@ -927,63 +920,41 @@ func (ctx *context) genFieldDecLines(t reflect.Type, lines *[]string, fieldName 
 		line = ctx.buildDecLine("Uint32", fieldName, ending, t)
 	case reflect.Uint64:
 		line = ctx.buildDecLine("Uint64", fieldName, ending, t)
-	case reflect.Float32:
-		line = ctx.buildDecLine("Float32", fieldName, ending, t)
-	case reflect.Float64:
-		line = ctx.buildDecLine("Float64", fieldName, ending, t)
 	case reflect.String:
 		line = ctx.buildDecLine("String", fieldName, ending, t)
-	case reflect.Array, reflect.Slice:
-		line = fmt.Sprintf("length = codonDecodeInt(bz, &n, &err)%s", ending)
-		needLength = true
-		*lines = append(*lines, line)
+	case reflect.Array:
+		if t.Elem().Kind() != reflect.Uint8 {
+			panic("ByteArray is the only supported array type")
+		}
+		*lines = append(*lines, fmt.Sprintf("o := %s[:]", fieldName))
+		line = fmt.Sprintf("n, err = codonGetByteSlice(&o, bz)%s", ending)
+	case reflect.Slice:
 		typeName, isPtr := ctx.getTypeInfo(t.Elem())
 		elemT := t.Elem()
 		if isPtr {
-			if t.Kind() == reflect.Slice {
-				makeSlice := fmt.Sprintf("if length==0 {%s = nil\n} else {\n%s = make([]*%s, length)\n}",
-					fieldName, fieldName, typeName)
-				*lines = append(*lines, makeSlice)
-			}
-			iterVar := fmt.Sprintf("_%d", iterLevel)
-			initVar := fmt.Sprintf("%s, length_%d := 0, length", iterVar, iterLevel)
-			line = fmt.Sprintf("for %s; %s<length_%d; %s++ { //%s of %s",
-				initVar, iterVar, iterLevel, iterVar, t.Kind(), elemT.Kind())
-			*lines = append(*lines, line)
 			if elemT.Kind() == reflect.Interface || elemT.Kind() == reflect.Struct {
-				line = fmt.Sprintf("tmp, n, err := Decode%s(bz)%s", typeName, ending)
-				*lines = append(*lines, line)
-				line = fmt.Sprintf("%s[%s] = &tmp", fieldName, iterVar)
+				line = fmt.Sprintf("var tmp %s\ntmp, n, err = Decode%s(bz)%s",
+					typeName, typeName, ending)
 				*lines = append(*lines, line)
 			} else {
-				varName := fieldName + "[" + iterVar + "]"
-				nl := ctx.genFieldDecLines(elemT, lines, varName, iterLevel+1)
-				needLength = needLength || nl
+				ctx.genFieldDecLines(fieldNum, elemT, lines, "tmp", iterLevel+1)
 			}
-			line = "}"
+			line = fmt.Sprintf("%s = append(%s, &tmp)", fieldName, fieldName)
 		} else {
-			if t.Kind() == reflect.Slice && elemT.Kind() != reflect.Uint8 {
-				makeSlice := fmt.Sprintf("if length==0 {%s = nil\n} else {\n%s = make([]%s, length)\n}",
-					fieldName, fieldName, typeName)
-				*lines = append(*lines, makeSlice)
-			}
-			if t.Kind() == reflect.Slice && elemT.Kind() == reflect.Uint8 {
-				line = fmt.Sprintf("%s, n, err = codonGetByteSlice(bz, length)%s", fieldName, ending)
-			} else {
-				iterVar := fmt.Sprintf("_%d", iterLevel)
-				initVar := fmt.Sprintf("%s, length_%d := 0, length", iterVar, iterLevel)
-				line = fmt.Sprintf("for %s; %s<length_%d; %s++ { //%s of %s",
-					initVar, iterVar, iterLevel, iterVar, t.Kind(), elemT.Kind())
+			if elemT.Kind() == reflect.Uint8 {
+				line = fmt.Sprintf("var tmpBz []byte\nn, err = codonGetByteSlice(&tmpBz, bz)%s", ending)
 				*lines = append(*lines, line)
+				line = fmt.Sprintf("%s = tmpBz", fieldName)
+			} else {
 				if elemT.Kind() == reflect.Interface || elemT.Kind() == reflect.Struct {
-					line = fmt.Sprintf("%s[%s], n, err = Decode%s(bz)%s", fieldName, iterVar, typeName, ending)
+					line = fmt.Sprintf("var tmp %s\ntmp, n, err = Decode%s(bz)%s",
+						typeName, typeName, ending)
 					*lines = append(*lines, line)
 				} else {
-					varName := fieldName + "[" + iterVar + "]"
-					nl := ctx.genFieldDecLines(elemT, lines, varName, iterLevel+1)
-					needLength = needLength || nl
+					*lines = append(*lines, fmt.Sprintf("var tmp %s", typeName))
+					ctx.genFieldDecLines(fieldNum, elemT, lines, "tmp", iterLevel+1)
 				}
-				line = "}"
+				line = fmt.Sprintf("%s = append(%s, tmp)", fieldName, fieldName)
 			}
 		}
 	case reflect.Interface:
@@ -1007,25 +978,32 @@ func (ctx *context) genFieldDecLines(t reflect.Type, lines *[]string, fieldName 
 			if isPtr {
 				*lines = append(*lines, ctx.initPtrMember(fieldName, t))
 			}
-			nl := ctx.genStructDecLines(t, lines, fieldName, iterLevel)
-			needLength = needLength || nl
-			line = "// end of " + fieldName
+			*lines = append(*lines, fmt.Sprintf("l := codonDecodeUint64(bz, &n, &err)%s", ending))
+			*lines = append(*lines, "func(bz []byte) {")
+			*lines = append(*lines, "for len(bz) != 0 {")
+			*lines = append(*lines, fmt.Sprintf("tag := codonDecodeUint64(bz, &n, &err)%s", ending))
+			*lines = append(*lines, "tag = tag >> 3")
+			*lines = append(*lines, "switch tag {")
+			ctx.genStructDecLines(t, lines, fieldName, iterLevel)
+			*lines = append(*lines, "default: err = errors.New(\"Unknown Field\")\nreturn\n}")
+			*lines = append(*lines, "} // end for")
+			*lines = append(*lines, "}(bz[:l]) // end func")
+			*lines = append(*lines, "if err != nil {return}")
+			*lines = append(*lines, "bz = bz[l:]\nn += int(l)")
 		}
 	default:
 		panic(fmt.Sprintf("Unknown Kind %s", t.Kind()))
 	}
 	*lines = append(*lines, line)
-	return needLength
 }
 
-func (ctx *context) genStructDecLines(t reflect.Type, lines *[]string, varName string, iterLevel int) bool {
-	needLength := false
+func (ctx *context) genStructDecLines(t reflect.Type, lines *[]string, varName string, iterLevel int) {
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
-		nl := ctx.genFieldDecLines(field.Type, lines, varName+"."+field.Name, iterLevel)
-		needLength = needLength || nl
+		fieldName := varName+"."+field.Name
+		*lines = append(*lines, fmt.Sprintf("case %d: // %s", i, fieldName))
+		ctx.genFieldDecLines(i, field.Type, lines, fieldName, iterLevel)
 	}
-	return needLength
 }
 
 //======================
