@@ -354,16 +354,16 @@ func (_ *CodonStub) DeepCopy(o interface{}) (r interface{}) {
 }
 
 func (_ *CodonStub) MarshalBinaryBare(o interface{}) ([]byte, error) {
-	if _, err := getMagicBytesOfVar(o); err!=nil {
-		return nil, err
+	if _, ok := getMagicNumOfVar(o); !ok {
+		return nil, errors.New("Not Supported Type")
 	}
 	buf := make([]byte, 0, 1024)
 	EncodeAny(&buf, o)
 	return buf, nil
 }
 func (s *CodonStub) MarshalBinaryLengthPrefixed(o interface{}) ([]byte, error) {
-	if _, err := getMagicBytesOfVar(o); err!=nil {
-		return nil, err
+	if _, ok := getMagicNumOfVar(o); !ok {
+		return nil, errors.New("Not Supported Type")
 	}
 	bz, err := s.MarshalBinaryBare(o)
 	var buf [binary.MaxVarintLen64]byte
@@ -378,15 +378,6 @@ func (_ *CodonStub) UnmarshalBinaryBare(bz []byte, ptr interface{}) error {
 
 	if len(bz) <= 4 {
 		return fmt.Errorf("Byte slice is too short: %d", len(bz))
-	}
-	if rv.Elem().Kind() != reflect.Interface {
-		magicBytes, err := getMagicBytesOfVar(ptr)
-		if err!=nil {
-			return err
-		}
-		if bz[0]!=magicBytes[0] || bz[1]!=magicBytes[1] || bz[2]!=magicBytes[2] || bz[3]!=magicBytes[3] {
-			return fmt.Errorf("MagicBytes Missmatch %v vs %v", bz[0:4], magicBytes[:])
-		}
 	}
 	o, _, err := DecodeAny(bz)
 	if rv.Elem().Kind() == reflect.Interface {

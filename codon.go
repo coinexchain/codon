@@ -2,6 +2,7 @@ package codon
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"reflect"
@@ -134,19 +135,18 @@ func showInfo(leafTypes map[string]string, indent string, t reflect.Type) {
 	fmt.Printf("%s\n", ending)
 }
 
-type MagicBytes [4]byte
+func calcMagicNum(lines []string) uint32 {
+	q := uint64(1)<<32
+	q = q-(1<<16)
 
-func calcMagicBytes(lines []string) [4]byte {
-	var res [4]byte
 	h := sha256.New()
 	for _, line := range lines {
 		h.Write([]byte(line))
 	}
 	bz := h.Sum(nil)
-	for i := 0; i < 4; i++ {
-		res[i] = bz[i]
-	}
-	return res
+	val64 := binary.LittleEndian.Uint64(bz[:8])
+	val64 = val64 % q
+	return uint32(val64 + (1<<16)) // MagicNum must be larger than 65535
 }
 
 type TypeEntry struct {
@@ -215,8 +215,8 @@ func GenerateCodecFile(
 			writeLines(w, lines)
 		}
 	}
-	// Generate the "getMagicBytes" and "getMagicBytesOfVar" functions, which maps aliases to magic bytes
-	lines := ctx.generateMagicBytesFunc()
+	// Generate the "getMagicNum" and "getMagicNumOfVar" functions, which maps aliases to magic bytes
+	lines := ctx.generateMagicNumFunc()
 	writeLines(w, lines)
 
 	// Get sorted list of struct aliases
@@ -255,8 +255,8 @@ type context struct {
 	// map an interface to its implementations
 	ifcPath2StructPaths map[string][]string
 
-	structAlias2MagicBytes map[string]MagicBytes
-	magicBytes2StructAlias map[MagicBytes]string
+	structAlias2MagicNum map[string]uint32
+	magicNum2StructAlias map[uint32]string
 
 	leafTypes  map[string]string
 	ignoreImpl map[string]string
@@ -271,8 +271,8 @@ func newContext(leafTypes, ignoreImpl map[string]string) *context {
 		ifcPath2Type:     make(map[string]reflect.Type),
 
 		ifcPath2StructPaths:    make(map[string][]string),
-		structAlias2MagicBytes: make(map[string]MagicBytes),
-		magicBytes2StructAlias: make(map[MagicBytes]string),
+		structAlias2MagicNum:   make(map[string]uint32),
+		magicNum2StructAlias:   make(map[uint32]string),
 		leafTypes:              leafTypes,
 		ignoreImpl:             ignoreImpl,
 	}
@@ -285,12 +285,18 @@ func generateIfcEncodeFunc(funcName string, aliases []string) []string {
 	lines = append(lines, "switch v := x.(type) {")
 	for _, alias := range aliases {
 		lines = append(lines, fmt.Sprintf("case %s:", alias))
-		lines = append(lines, fmt.Sprintf("*w = append(*w, getMagicBytes(\"%s\")...)", alias))
+		line := fmt.Sprintf("codonEncodeByteSlice(int(getMagicNum(\"%s\")), w, func() []byte {", alias)
+		lines = append(lines, line)
+		lines = append(lines, "wBuf := make([]byte, 0, 64)\nw := &wBuf")
 		lines = append(lines, fmt.Sprintf("Encode%s(w, v)", alias))
+		lines = append(lines, "return wBuf\n}())")
 
 		lines = append(lines, fmt.Sprintf("case *%s:", alias))
-		lines = append(lines, fmt.Sprintf("*w = append(*w, getMagicBytes(\"%s\")...)", alias))
+		line = fmt.Sprintf("codonEncodeByteSlice(int(getMagicNum(\"%s\")), w, func() []byte {", alias)
+		lines = append(lines, line)
+		lines = append(lines, "wBuf := make([]byte, 0, 64)\nw := &wBuf")
 		lines = append(lines, fmt.Sprintf("Encode%s(w, *v)", alias))
+		lines = append(lines, "return wBuf\n}())")
 	}
 	lines = append(lines, "default:")
 	lines = append(lines, `panic(fmt.Sprintf("Unknown Type %v %v\n", x, reflect.TypeOf(x)))`)
@@ -356,39 +362,62 @@ func (ctx *context) generateIfcDeepCopyFunc(funcName, ifcAlias string, ifcType r
 }
 
 func (ctx *context) generateDecodeAnyFunc() []string {
-	res, _ := ctx.generateIfcDecodeFunc("DecodeAny", "interface{}", nil, ctx.structAlias2MagicBytes)
+	res, _ := ctx.generateIfcDecodeFunc("DecodeAny", "interface{}", nil, ctx.structAlias2MagicNum)
 	return res
 }
 
-func (ctx *context) generateIfcDecodeFunc(funcName, decTypeName string, decType reflect.Type, alias2bytes map[string]MagicBytes) ([]string, []string) {
+var beforeDecodeFunc = `l := codonDecodeUint64(bz, &n, &err)
+if err != nil {
+	return
+}
+bz = bz[n:]
+total += n
+if int(l) > len(bz) {
+	err = errors.New("Length Too Large")
+	return
+}`
+
+var afterDecodeFunc = `if int(l) != n {
+	err = errors.New("Length Mismatch")
+	return
+}`
+
+var ending = "\nif err != nil {return}\nbz = bz[n:]\ntotal+=n"
+
+func (ctx *context) generateIfcDecodeFunc(funcName, decTypeName string, decType reflect.Type, alias2bytes map[string]uint32) ([]string, []string) {
 	aliases := make([]string, 0, len(alias2bytes))
 	for alias := range alias2bytes {
 		aliases = append(aliases, alias)
 	}
 	sort.Strings(aliases)
 	lines := make([]string, 0, 1000)
-	lines = append(lines, "func "+funcName+"(bz []byte) ("+decTypeName+", int, error) {")
-	lines = append(lines, "var v "+decTypeName)
-	lines = append(lines, "var magicBytes [4]byte")
-	lines = append(lines, "var n int")
+	lines = append(lines, "func "+funcName+"(bz []byte) (v "+decTypeName+", total int, err error) {")
+	lines = append(lines, `
+	var n int
+	tag := codonDecodeUint64(bz, &n, &err)
+	if err != nil {
+		return
+	}
+	bz = bz[n:]
+	total += n
+	magicNum := uint32(tag >> 3)`)
 
-	extraByteCount := 4
-
-	lines = append(lines, "for i:=0; i<4; i++ {magicBytes[i] = bz[i]}")
-	lines = append(lines, "switch magicBytes {")
+	lines = append(lines, "switch magicNum {")
 	for _, alias := range aliases {
-		magicBytes := alias2bytes[alias]
-		lines = append(lines, fmt.Sprintf("case [4]byte{%d,%d,%d,%d}:",
-			magicBytes[0], magicBytes[1], magicBytes[2], magicBytes[3]))
-		lines = append(lines, fmt.Sprintf("v, n, err := Decode%s(bz[4:])", alias))
+		magicNum := alias2bytes[alias]
+		lines = append(lines, fmt.Sprintf("case %d:", magicNum))
+		lines = append(lines, beforeDecodeFunc)
+		lines = append(lines, fmt.Sprintf("var tmp %s", alias))
+		lines = append(lines, fmt.Sprintf("tmp, n, err = Decode%s(bz[:l])%s", alias, ending))
+		lines = append(lines, afterDecodeFunc)
 		structType, ok := ctx.structAlias2Type[alias]
 		if !ok {
 			panic("Can not find type for "+alias)
 		}
 		if decType == nil || structType.Implements(decType) {
-			lines = append(lines, fmt.Sprintf("return v, n+%d, err", extraByteCount))
+			lines = append(lines, "v = tmp\nreturn")
 		} else if reflect.PtrTo(structType).Implements(decType) {
-			lines = append(lines, fmt.Sprintf("return &v, n+%d, err", extraByteCount))
+			lines = append(lines, "v = &tmp\nreturn")
 		} else {
 		}
 	}
@@ -400,36 +429,33 @@ func (ctx *context) generateIfcDecodeFunc(funcName, decTypeName string, decType 
 	return lines, aliases
 }
 
-func (ctx *context) generateMagicBytesFunc() []string {
+func (ctx *context) generateMagicNumFunc() []string {
 	lines := make([]string, 0, 1000)
-	lines = append(lines, "func getMagicBytes(name string) []byte {")
+	lines = append(lines, "func getMagicNum(name string) uint32 {")
 	lines = append(lines, "switch name {")
-	aliases := make([]string, 0, len(ctx.structAlias2MagicBytes))
-	for alias := range ctx.structAlias2MagicBytes {
+	aliases := make([]string, 0, len(ctx.structAlias2MagicNum))
+	for alias := range ctx.structAlias2MagicNum {
 		aliases = append(aliases, alias)
 	}
 	sort.Strings(aliases)
 	for _, alias := range aliases {
-		magicBytes := ctx.structAlias2MagicBytes[alias]
+		magicNum := ctx.structAlias2MagicNum[alias]
 		lines = append(lines, fmt.Sprintf("case \"%s\":", alias))
-		lines = append(lines, fmt.Sprintf("return []byte{%d,%d,%d,%d}",
-			magicBytes[0], magicBytes[1], magicBytes[2], magicBytes[3]))
+		lines = append(lines, fmt.Sprintf("return %d", magicNum))
 	}
 	lines = append(lines, "} // end of switch")
 	lines = append(lines, "panic(\"Should not reach here\")")
-	lines = append(lines, "return []byte{}")
-	lines = append(lines, "} // end of getMagicBytes")
+	lines = append(lines, "return 0")
+	lines = append(lines, "} // end of getMagicNum")
 
-	lines = append(lines, "func getMagicBytesOfVar(x interface{}) ([4]byte, error) {")
+	lines = append(lines, "func getMagicNumOfVar(x interface{}) (uint32, bool) {")
 	lines = append(lines, "switch x.(type) {")
 	for _, alias := range aliases {
 		lines = append(lines, fmt.Sprintf("case *%s, %s:", alias, alias))
-		magicBytes := ctx.structAlias2MagicBytes[alias]
-		lines = append(lines, fmt.Sprintf("return [4]byte{%d,%d,%d,%d}, nil",
-			magicBytes[0], magicBytes[1], magicBytes[2], magicBytes[3]))
+		magicNum := ctx.structAlias2MagicNum[alias]
+		lines = append(lines, fmt.Sprintf("return %d, true", magicNum))
 	}
-	lines = append(lines, "default:")
-	lines = append(lines, `panic(fmt.Sprintf("Unknown Type %v %v\n", x, reflect.TypeOf(x)))`)
+	lines = append(lines, "default:\nreturn 0, false")
 	lines = append(lines, "} // end of switch")
 	lines = append(lines, "} // end of func")
 	return lines
@@ -495,12 +521,12 @@ func (ctx *context) register(alias string, name string, v interface{}) {
 		}
 		ctx.structPath2Type[path] = t
 		ctx.structAlias2Type[alias] = t
-		magicBytes := calcMagicBytes([]string{alias, name})
-		if otherAlias, ok := ctx.magicBytes2StructAlias[magicBytes]; ok {
+		magicNum := calcMagicNum([]string{alias, name})
+		if otherAlias, ok := ctx.magicNum2StructAlias[magicNum]; ok {
 			panic("Magic Bytes Conflicts: " + otherAlias + " vs " + alias)
 		}
-		ctx.structAlias2MagicBytes[alias] = magicBytes
-		ctx.magicBytes2StructAlias[magicBytes] = alias
+		ctx.structAlias2MagicNum[alias] = magicNum
+		ctx.magicNum2StructAlias[magicNum] = alias
 	}
 }
 
@@ -540,17 +566,17 @@ func (ctx *context) generateIfcFunc(ifc string, t reflect.Type) []string {
 	if !ok {
 		panic("Cannot find implementations for " + ifc)
 	}
-	alias2bytes := make(map[string]MagicBytes, len(structPaths))
+	alias2bytes := make(map[string]uint32, len(structPaths))
 	for _, structPath := range structPaths {
 		alias, ok := ctx.structPath2Alias[structPath]
 		if !ok {
 			panic("Cannot find alias")
 		}
-		magicBytes, ok := ctx.structAlias2MagicBytes[alias]
+		magicNum, ok := ctx.structAlias2MagicNum[alias]
 		if !ok {
 			panic("Cannot find magicbytes")
 		}
-		alias2bytes[alias] = magicBytes
+		alias2bytes[alias] = magicNum
 	}
 	decLines, aliases := ctx.generateIfcDecodeFunc("Decode"+ifc, ifc, t, alias2bytes)
 	encLines := generateIfcEncodeFunc("Encode"+ifc, aliases)
@@ -655,6 +681,9 @@ func isMutex(t reflect.Type) bool {
 }
 
 func (ctx *context) genFieldEncLines(fieldNum int, t reflect.Type, lines *[]string, fieldName string, iterLevel int) {
+	if fieldNum >= (1<<16) {
+		panic("Field Number is too large")
+	}
 	if isMutex(t) {
 		return
 	}
@@ -866,24 +895,12 @@ func (ctx *context) initPtrMember(fieldName string, t reflect.Type) string {
 }
 
 func (ctx *context) genFieldDecLines(fieldNum int, t reflect.Type, lines *[]string, fieldName string, iterLevel int) {
-	beforeDecodeFunc := `l := codonDecodeUint64(bz, &n, &err)
-	if err != nil {
-		return
+	if fieldNum >= (1<<16) {
+		panic("Field Number is too large")
 	}
-	bz = bz[n:]
-	total += n
-	if int(l) > len(bz) {
-		err = errors.New("Length Too Large")
-		return
-	}`
-	afterDecodeFunc := `if int(l) != n {
-		err = errors.New("Length Mismatch")
-		return
-	}`
 	if isMutex(t) {
 		return
 	}
-	ending := "\nif err != nil {return}\nbz = bz[n:]\ntotal+=n"
 	isPtr := false
 	if t.Kind() == reflect.Ptr {
 		isPtr = true
