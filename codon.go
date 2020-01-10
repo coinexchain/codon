@@ -11,6 +11,12 @@ import (
 	"unicode"
 )
 
+const (
+	MaxFieldNum = 18999
+	MaxMagicNum = 536_870_911
+	MinMagicNum = 20000
+)
+
 func ShowInfoForVar(leafTypes map[string]string, v interface{}) {
 	t := reflect.TypeOf(v)
 	if t.Kind() == reflect.Ptr {
@@ -136,17 +142,18 @@ func showInfo(leafTypes map[string]string, indent string, t reflect.Type) {
 }
 
 func calcMagicNum(lines []string) uint32 {
-	q := uint64(1)<<32
-	q = q-(1<<16)
-
 	h := sha256.New()
 	for _, line := range lines {
 		h.Write([]byte(line))
 	}
 	bz := h.Sum(nil)
 	val64 := binary.LittleEndian.Uint64(bz[:8])
-	val64 = val64 % q
-	return uint32(val64 + (1<<16)) // MagicNum must be larger than 65535
+	val64 = val64 % (MaxMagicNum - MinMagicNum)
+	val64 = val64 + MinMagicNum
+	if val64 > MaxMagicNum || val64 < MinMagicNum {
+		panic("MagicNum calculation error")
+	}
+	return uint32(val64)
 }
 
 type TypeEntry struct {
@@ -681,7 +688,7 @@ func isMutex(t reflect.Type) bool {
 }
 
 func (ctx *context) genFieldEncLines(fieldNum int, t reflect.Type, lines *[]string, fieldName string, iterLevel int) {
-	if fieldNum >= (1<<16) {
+	if fieldNum > MaxFieldNum {
 		panic("Field Number is too large")
 	}
 	if isMutex(t) {
@@ -818,7 +825,7 @@ func (ctx *context) genFieldEncLines(fieldNum int, t reflect.Type, lines *[]stri
 func (ctx *context) genStructEncLines(t reflect.Type, lines *[]string, varName string, iterLevel int) {
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
-		ctx.genFieldEncLines(i, field.Type, lines, varName+"."+field.Name, iterLevel)
+		ctx.genFieldEncLines(i+1, field.Type, lines, varName+"."+field.Name, iterLevel)
 	}
 }
 
@@ -895,7 +902,7 @@ func (ctx *context) initPtrMember(fieldName string, t reflect.Type) string {
 }
 
 func (ctx *context) genFieldDecLines(fieldNum int, t reflect.Type, lines *[]string, fieldName string, iterLevel int) {
-	if fieldNum >= (1<<16) {
+	if fieldNum >= MaxFieldNum {
 		panic("Field Number is too large")
 	}
 	if isMutex(t) {
@@ -1044,7 +1051,7 @@ func (ctx *context) genStructDecLines(t reflect.Type, lines *[]string, varName s
 		field := t.Field(i)
 		fieldName := varName+"."+field.Name
 		*lines = append(*lines, fmt.Sprintf("case %d: // %s", i, fieldName))
-		ctx.genFieldDecLines(i, field.Type, lines, fieldName, iterLevel)
+		ctx.genFieldDecLines(i+1, field.Type, lines, fieldName, iterLevel)
 	}
 }
 
