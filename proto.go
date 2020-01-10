@@ -168,7 +168,9 @@ func (ctx *context) dumpStructProto(typeEntryList []TypeEntry) {
 		if _, ok := ctx.leafTypes[path]; ok {
 			continue
 		}
-		name2type[t.Name()] = t
+		if len(t.PkgPath()) != 0 { //ignore primitive types
+			name2type[t.Name()] = t
+		}
 		if t.Kind() != reflect.Struct {
 			continue
 		}
