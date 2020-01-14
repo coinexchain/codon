@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"sort"
 	"strings"
-	"unicode"
 )
 
 const (
@@ -16,130 +15,6 @@ const (
 	MaxMagicNum = 536_870_911
 	MinMagicNum = 20000
 )
-
-func ShowInfoForVar(leafTypes map[string]string, v interface{}) {
-	t := reflect.TypeOf(v)
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
-	// Print the information header
-	fmt.Printf("======= %v '%s' '%s' == \n", t, t.PkgPath(), t.Name())
-	showInfo(leafTypes, "", t)
-}
-
-func structHasPrivateField(t reflect.Type) bool {
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		var isPrivate bool
-		for _, r := range field.Name {
-			isPrivate = unicode.IsLower(r)
-			break
-		}
-		if isPrivate {
-			return true
-		}
-	}
-	return false
-}
-
-func showInfo(leafTypes map[string]string, indent string, t reflect.Type) {
-	ending := ""
-	indentP := indent + "    "
-	switch t.Kind() {
-	case reflect.Bool:
-		fmt.Printf("bool")
-	case reflect.Int:
-		fmt.Printf("int")
-	case reflect.Int8:
-		fmt.Printf("int8")
-	case reflect.Int16:
-		fmt.Printf("int16")
-	case reflect.Int32:
-		fmt.Printf("int32")
-	case reflect.Int64:
-		fmt.Printf("int64")
-	case reflect.Uint:
-		fmt.Printf("uint")
-	case reflect.Uint8:
-		fmt.Printf("uint8")
-	case reflect.Uint16:
-		fmt.Printf("uint16")
-	case reflect.Uint32:
-		fmt.Printf("uint32")
-	case reflect.Uint64:
-		fmt.Printf("uint64")
-	case reflect.Uintptr:
-		fmt.Printf("Uintptr!")
-	case reflect.Complex64:
-		fmt.Printf("complex64!")
-	case reflect.Complex128:
-		fmt.Printf("complex128!")
-	case reflect.Float32:
-		fmt.Printf("float32")
-	case reflect.Float64:
-		fmt.Printf("float64")
-	case reflect.Chan:
-		fmt.Printf("chan!")
-	case reflect.Func:
-		fmt.Printf("func!")
-	case reflect.Interface:
-		fmt.Printf("interface (%s %s)!", t.PkgPath(), t.Name())
-	case reflect.Map:
-		fmt.Printf("map!")
-	case reflect.Ptr:
-		path := t.Elem().PkgPath() + "." + t.Elem().Name()
-		if _, ok := leafTypes[path]; ok { // Stop when meeting a leaf type
-			fmt.Printf("pointer ('%s' '%s')\n", t.Elem().PkgPath(), t.Elem().Name())
-		} else {
-			fmt.Printf("pointer ('%s' '%s') {\n", t.Elem().PkgPath(), t.Elem().Name())
-			fmt.Printf("%s", indentP)
-			showInfo(leafTypes, indentP, t.Elem())
-			ending = indent + "} // pointer"
-		}
-	case reflect.Array:
-		fmt.Printf("array {\n")
-		fmt.Printf("%s", indentP)
-		showInfo(leafTypes, indentP, t.Elem())
-		ending = indent + "} //array"
-	case reflect.Slice:
-		if t.Elem().Kind() == reflect.Uint8 {
-			fmt.Printf("ByteSlice")
-		} else {
-			fmt.Printf("slice {\n")
-			fmt.Printf("%s", indentP)
-			showInfo(leafTypes, indentP, t.Elem())
-			ending = indent + "} //slice"
-		}
-	case reflect.String:
-		fmt.Printf("string")
-	case reflect.Struct:
-		path := t.PkgPath() + "." + t.Name()
-		if _, ok := leafTypes[path]; ok { // Stop when meeting a leaf type
-			fmt.Printf("struct ('%s' '%s')\n", t.PkgPath(), t.Name())
-		} else {
-			if structHasPrivateField(t) {
-				fmt.Printf("struct_with_private {\n")
-			} else {
-				fmt.Printf("struct {\n")
-			}
-			for i := 0; i < t.NumField(); i++ {
-				field := t.Field(i)
-				fmt.Printf("%s%s : ('%s' '%s') ", indentP, field.Name, field.Type.PkgPath(), field.Type.Name())
-				path = field.Type.PkgPath() + "." + field.Type.Name()
-				if _, ok := leafTypes[path]; ok {
-					fmt.Printf("\n")
-				} else {
-					showInfo(leafTypes, indentP, field.Type)
-				}
-			}
-			ending = indent + "} //struct"
-		}
-	default:
-		fmt.Printf("Unknown Kind! %s", t.Kind())
-	}
-
-	fmt.Printf("%s\n", ending)
-}
 
 func calcMagicNum(lines []string) uint32 {
 	h := sha256.New()
